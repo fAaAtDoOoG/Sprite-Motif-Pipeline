@@ -16,6 +16,8 @@ from PIL import Image, ImageTk
 from .comfy import ComfyClient, validate_model_assets, validate_required_nodes
 from .config import DEFAULT_HIGH_RES, DEFAULT_LOW_RES, DEFAULTS, format_size, parse_size
 from .model_assets import assets_for_filenames, default_models_root, download_assets, missing_local_assets
+from .ollama import DEFAULT_OLLAMA_ENDPOINT, OllamaValidation, pull_ollama_model, validate_ollama_model
+from .progress import generation_percent, percent_from_message, short_status
 from .prompting import LLMConfig, compose_prompt
 from .runner import GenerationOptions, generate_batch
 from .session import Candidate, RunManifest, load_manifest, save_manifest
@@ -118,7 +120,7 @@ class SpritePipeApp:
         self.dry_run_var = tk.BooleanVar(value=False)
         self.llm_provider_var = tk.StringVar(value="ollama")
         self.llm_model_var = tk.StringVar(value="qwen2.5:7b-instruct")
-        self.llm_endpoint_var = tk.StringVar(value="http://127.0.0.1:11434")
+        self.llm_endpoint_var = tk.StringVar(value=DEFAULT_OLLAMA_ENDPOINT)
         self.status_var = tk.StringVar(value="Ready")
 
     def _build_ui(self) -> None:
@@ -152,13 +154,15 @@ class SpritePipeApp:
         backend.columnconfigure(1, weight=1)
         ttk.Label(backend, text="ComfyUI").grid(row=0, column=0, sticky="w")
         ttk.Entry(backend, textvariable=self.comfy_url_var).grid(row=0, column=1, sticky="ew", padx=6)
-        ttk.Button(backend, text="Validate", command=self.validate_comfy).grid(row=0, column=2)
+        self.comfy_validate_button = ttk.Button(backend, text="Validate", command=self.validate_comfy)
+        self.comfy_validate_button.grid(row=0, column=2)
         ttk.Label(backend, text="Models").grid(row=1, column=0, sticky="w", pady=(6, 0))
         ttk.Entry(backend, textvariable=self.models_root_var).grid(row=1, column=1, sticky="ew", padx=6, pady=(6, 0))
         model_buttons = ttk.Frame(backend)
         model_buttons.grid(row=1, column=2, sticky="ew", pady=(6, 0))
         ttk.Button(model_buttons, text="Browse", command=self.browse_models_root).pack(side=tk.LEFT)
-        ttk.Button(model_buttons, text="Download Missing", command=self.download_missing_models).pack(side=tk.LEFT, padx=(4, 0))
+        self.model_download_button = ttk.Button(model_buttons, text="Download Missing", command=self.download_missing_models)
+        self.model_download_button.pack(side=tk.LEFT, padx=(4, 0))
         ttk.Label(backend, text="Output").grid(row=2, column=0, sticky="w", pady=(6, 0))
         ttk.Entry(backend, textvariable=self.output_dir_var).grid(row=2, column=1, sticky="ew", padx=6, pady=(6, 0))
         ttk.Button(backend, text="Browse", command=self.browse_output_dir).grid(row=2, column=2, pady=(6, 0))
@@ -198,6 +202,13 @@ class SpritePipeApp:
         ttk.Entry(llm, textvariable=self.llm_model_var).grid(row=1, column=1, sticky="ew", padx=6, pady=(6, 0))
         ttk.Label(llm, text="Endpoint").grid(row=2, column=0, sticky="w", pady=(6, 0))
         ttk.Entry(llm, textvariable=self.llm_endpoint_var).grid(row=2, column=1, sticky="ew", padx=6, pady=(6, 0))
+        llm_buttons = ttk.Frame(llm)
+        llm_buttons.grid(row=3, column=1, sticky="ew", padx=6, pady=(8, 0))
+        llm_buttons.columnconfigure((0, 1), weight=1)
+        self.llm_validate_button = ttk.Button(llm_buttons, text="Validate", command=self.validate_prompt_model)
+        self.llm_validate_button.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        self.llm_download_button = ttk.Button(llm_buttons, text="Download Model", command=self.download_prompt_model)
+        self.llm_download_button.grid(row=0, column=1, sticky="ew", padx=(4, 0))
 
         actions = ttk.Frame(parent)
         actions.grid(row=4, column=0, sticky="ew", pady=(10, 0))
@@ -362,9 +373,9 @@ class SpritePipeApp:
                 llm_config=llm_config,
             )
             self.events.put(("prompt", spec.positive_prompt))
-            return generate_batch(spec, description=text, options=options, progress=lambda message: self.events.put(("log", message)))
+            return generate_batch(spec, description=text, options=options, progress=lambda message: self._queue_generation_progress(message, options.batch_size))
 
-        self._run_worker("Generating", work, self.load_run)
+        self._run_worker("Generating", work, self.load_run, determinate=True)
 
     def iterate_selected(self) -> None:
         if self.current_run_dir is None or self.current_manifest is None:
@@ -403,14 +414,14 @@ class SpritePipeApp:
                 parent_run=str(previous_run),
                 selected_index=candidate.index,
                 feedback=feedback,
-                progress=lambda message: self.events.put(("log", message)),
+                progress=lambda message: self._queue_generation_progress(message, options.batch_size),
             )
             previous_manifest.selected_index = candidate.index
             previous_manifest.feedback = feedback
             save_manifest(previous_run, previous_manifest)
             return run_dir
 
-        self._run_worker("Iterating", work, self.load_run)
+        self._run_worker("Iterating", work, self.load_run, determinate=True)
 
     def browse_output_dir(self) -> None:
         path = filedialog.askdirectory(initialdir=str(Path(self.output_dir_var.get() or ".").resolve()))
@@ -433,9 +444,83 @@ class SpritePipeApp:
         if messagebox.askyesno("Download models?", "\n".join(lines)):
             self._download_assets(assets, models_root)
 
+    def validate_prompt_model(self) -> None:
+        config = self._llm_config_from_ui()
+        if config.provider != "ollama":
+            messagebox.showinfo("Prompt model", "Automatic local model validation is available for Ollama providers.")
+            return
+        if not config.model.strip():
+            messagebox.showerror("Prompt model", "Ollama model name is empty.")
+            return
+
+        def work() -> OllamaValidation:
+            return validate_ollama_model(
+                config.endpoint,
+                config.model,
+                progress=lambda message: self.events.put(("log", message)),
+            )
+
+        self._run_worker("Validating prompt model", work, self._handle_prompt_model_validation)
+
+    def _handle_prompt_model_validation(self, result: OllamaValidation) -> None:
+        if not result.server_available:
+            lines = [f"Ollama is not reachable at:\n{result.endpoint}", ""]
+            if result.cli_available:
+                lines.append("The Ollama executable was found, but the server could not be started automatically.")
+            else:
+                lines.append("The Ollama executable was not found. Install Ollama first, then click Validate again.")
+                lines.append("Download page: https://ollama.com/download")
+            messagebox.showerror("Prompt model", "\n".join(lines))
+            return
+
+        if result.model_present:
+            messagebox.showinfo("Prompt model", f"Ollama is ready.\n\nVersion: {result.version}\nModel: {result.model}")
+            return
+
+        lines = [
+            f"Ollama is running at:\n{result.endpoint}",
+            "",
+            f"Missing prompt model:\n{result.model}",
+            "",
+            "Download it now with Ollama?",
+        ]
+        if messagebox.askyesno("Download prompt model?", "\n".join(lines)):
+            self._download_prompt_model(self._llm_config_from_ui())
+
+    def download_prompt_model(self) -> None:
+        config = self._llm_config_from_ui()
+        if config.provider != "ollama":
+            messagebox.showinfo("Prompt model", "Automatic local model download is available for Ollama providers.")
+            return
+        if not config.model.strip():
+            messagebox.showerror("Prompt model", "Ollama model name is empty.")
+            return
+        lines = [
+            f"Download Ollama model:\n{config.model}",
+            "",
+            f"Endpoint:\n{config.endpoint or DEFAULT_OLLAMA_ENDPOINT}",
+            "",
+            "This can be several GB.",
+        ]
+        if messagebox.askyesno("Download prompt model?", "\n".join(lines)):
+            self._download_prompt_model(config)
+
+    def _download_prompt_model(self, config: LLMConfig) -> None:
+        def work() -> str:
+            return pull_ollama_model(
+                config.endpoint,
+                config.model,
+                progress=self._queue_download_progress,
+            )
+
+        def done(model: str) -> None:
+            messagebox.showinfo("Prompt model", f"Ollama model is ready:\n{model}")
+
+        self._run_worker("Downloading prompt model", work, done, determinate=True)
+
     def _download_assets(self, assets, models_root: Path) -> None:
         def work() -> list[Path]:
-            return download_assets(models_root, assets, progress=lambda message: self.events.put(("log", message)))
+            return download_assets(models_root, assets, progress=self._queue_download_progress)
 
         def done(paths: list[Path]) -> None:
             messagebox.showinfo(
@@ -444,7 +529,7 @@ class SpritePipeApp:
                 + "\n".join(str(path) for path in paths),
             )
 
-        self._run_worker("Downloading models", work, done)
+        self._run_worker("Downloading models", work, done, determinate=True)
 
     def browse_run(self) -> None:
         path = filedialog.askdirectory(initialdir=str(Path(self.output_dir_var.get() or ".").resolve()))
@@ -531,16 +616,19 @@ class SpritePipeApp:
             output_dir=Path(self.output_dir_var.get().strip() or "runs"),
             dry_run=bool(self.dry_run_var.get()),
         )
-        llm_config = LLMConfig.from_env()
-        llm_config = LLMConfig(
-            provider=self.llm_provider_var.get().strip() or llm_config.provider,
-            model=self.llm_model_var.get().strip() or llm_config.model,
-            endpoint=self.llm_endpoint_var.get().strip() or llm_config.endpoint,
-            api_key=llm_config.api_key,
-            temperature=llm_config.temperature,
-            timeout_s=llm_config.timeout_s,
-        )
+        llm_config = self._llm_config_from_ui()
         return mode, text, llm_config, options
+
+    def _llm_config_from_ui(self) -> LLMConfig:
+        env_config = LLMConfig.from_env()
+        return LLMConfig(
+            provider=(self.llm_provider_var.get().strip() or env_config.provider).lower(),
+            model=self.llm_model_var.get().strip() or env_config.model,
+            endpoint=self.llm_endpoint_var.get().strip() or env_config.endpoint or DEFAULT_OLLAMA_ENDPOINT,
+            api_key=env_config.api_key,
+            temperature=env_config.temperature,
+            timeout_s=env_config.timeout_s,
+        )
 
     def _compose_from_ui(self):
         mode, text, llm_config, _options = self._collect_payload()
@@ -551,13 +639,18 @@ class SpritePipeApp:
             llm_config=llm_config,
         )
 
-    def _run_worker(self, label: str, work, on_done) -> None:
+    def _run_worker(self, label: str, work, on_done, *, determinate: bool = False) -> None:
         if self.worker_active:
             return
         self.worker_active = True
         self._set_buttons(False)
         self.status_var.set(label)
-        self.progress.start(10)
+        if determinate:
+            self.progress.configure(mode="determinate", maximum=100, value=0)
+            self.events.put(("progress", (0, label)))
+        else:
+            self.progress.configure(mode="indeterminate")
+            self.progress.start(10)
 
         def target() -> None:
             try:
@@ -580,6 +673,12 @@ class SpritePipeApp:
             elif kind == "prompt":
                 self.prompt_text.delete("1.0", tk.END)
                 self.prompt_text.insert(tk.END, str(payload))
+            elif kind == "progress":
+                percent, label = payload
+                if percent is not None:
+                    self.progress.configure(mode="determinate", maximum=100, value=max(0, min(100, float(percent))))
+                if label:
+                    self.status_var.set(str(label))
             elif kind == "error":
                 self._finish_worker()
                 messagebox.showerror("Sprite Motif Pipeline", str(payload))
@@ -593,12 +692,21 @@ class SpritePipeApp:
     def _finish_worker(self) -> None:
         self.worker_active = False
         self.progress.stop()
+        self.progress.configure(mode="determinate", maximum=100, value=0)
         self.status_var.set("Ready")
         self._set_buttons(True)
 
     def _set_buttons(self, enabled: bool) -> None:
         state = tk.NORMAL if enabled else tk.DISABLED
-        for button in (self.preview_button, self.generate_button, self.iterate_button):
+        for button in (
+            self.comfy_validate_button,
+            self.model_download_button,
+            self.llm_validate_button,
+            self.llm_download_button,
+            self.preview_button,
+            self.generate_button,
+            self.iterate_button,
+        ):
             button.configure(state=state)
 
     def _selected_candidate(self) -> Candidate | None:
@@ -644,6 +752,18 @@ class SpritePipeApp:
     def _log(self, message: str) -> None:
         self.log_text.insert(tk.END, message + "\n")
         self.log_text.see(tk.END)
+
+    def _queue_download_progress(self, message: str) -> None:
+        self.events.put(("log", message))
+        percent = percent_from_message(message)
+        label = short_status(message)
+        self.events.put(("progress", (percent, label)))
+
+    def _queue_generation_progress(self, message: str, batch_size: int) -> None:
+        self.events.put(("log", message))
+        percent = generation_percent(message, batch_size)
+        label = short_status(message)
+        self.events.put(("progress", (percent, label)))
 
 
 if __name__ == "__main__":

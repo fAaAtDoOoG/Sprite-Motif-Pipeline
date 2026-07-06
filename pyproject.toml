@@ -25,7 +25,9 @@ dev = [
 
 [project.scripts]
 spritepipe = "sprite_motif_pipeline.cli:main"
-spritepipe-gui = "sprite_motif_pipeline.gui:main"
+spritepipe-gui = "sprite_motif_pipeline.web_gui:main"
+spritepipe-web = "sprite_motif_pipeline.web_gui:main"
+spritepipe-tk = "sprite_motif_pipeline.gui:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -27,7 +27,23 @@ If the command reports missing model files, download those exact filenames into
 the folders above and restart or refresh ComfyUI so `/object_info` sees the new
 backend model lists.
 
-The GUI has the same check. Its `Models` field defaults to a discovered ComfyUI
-`models` folder, and `Validate` will offer to download missing default
-`.safetensors` files into the correct subfolders. These files can be large, so
-the GUI asks before downloading.
+The browser GUI has the same check. Its `Models` field defaults to a discovered
+ComfyUI `models` folder, and `Validate ComfyUI` will offer to download missing
+default `.safetensors` files into the correct subfolders. These files can be
+large, so the GUI asks before downloading.
+
+## Prompt Model
+
+The default prompt-rewriting model is local Ollama `qwen2.5:7b-instruct` at
+`http://127.0.0.1:11434`.
+
+In the browser GUI, use `Validate Prompt Model` to check whether Ollama is
+reachable and whether the selected model exists. If the model is missing, the UI
+can pull it with Ollama. The same download is available through `Download Prompt
+Model`.
+
+You can also install it manually:
+
+```powershell
+ollama pull qwen2.5:7b-instruct
+```

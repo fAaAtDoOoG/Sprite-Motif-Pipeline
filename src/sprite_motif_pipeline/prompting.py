@@ -204,18 +204,26 @@ def _call_ollama(messages: list[dict[str, str]], config: LLMConfig) -> str:
     base = (config.endpoint or "http://127.0.0.1:11434").rstrip("/")
     if not config.model:
         raise ValueError("SPRITEPIPE_LLM_MODEL is required for Ollama")
-    response = requests.post(
-        f"{base}/api/chat",
-        json={
-            "model": config.model,
-            "messages": messages,
-            "stream": False,
-            "format": "json",
-            "options": {"temperature": config.temperature},
-        },
-        timeout=config.timeout_s,
-    )
-    response.raise_for_status()
+    try:
+        response = requests.post(
+            f"{base}/api/chat",
+            json={
+                "model": config.model,
+                "messages": messages,
+                "stream": False,
+                "format": "json",
+                "options": {"temperature": config.temperature},
+            },
+            timeout=config.timeout_s,
+        )
+        response.raise_for_status()
+    except requests.ConnectionError as exc:
+        raise RuntimeError(f"Ollama is not reachable at {base}. Use Prompt model Validate/Download, or start Ollama.") from exc
+    except requests.Timeout as exc:
+        raise RuntimeError(f"Ollama timed out at {base} while using model '{config.model}'.") from exc
+    except requests.HTTPError as exc:
+        detail = response.text.strip()[:500]
+        raise RuntimeError(f"Ollama request failed for model '{config.model}': {response.status_code} {detail}") from exc
     return response.json()["message"]["content"]
 
 
