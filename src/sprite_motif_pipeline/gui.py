@@ -15,6 +15,7 @@ from PIL import Image, ImageTk
 
 from .comfy import ComfyClient, validate_model_assets, validate_required_nodes
 from .config import DEFAULT_HIGH_RES, DEFAULT_LOW_RES, DEFAULTS, format_size, parse_size
+from .model_assets import assets_for_filenames, default_models_root, download_assets, missing_local_assets
 from .prompting import LLMConfig, compose_prompt
 from .runner import GenerationOptions, generate_batch
 from .session import Candidate, RunManifest, load_manifest, save_manifest
@@ -46,6 +47,7 @@ class SpritePipeApp:
 
     def _init_vars(self) -> None:
         self.comfy_url_var = tk.StringVar(value="http://127.0.0.1:8188")
+        self.models_root_var = tk.StringVar(value=str(default_models_root()))
         self.output_dir_var = tk.StringVar(value="runs")
         self.mode_var = tk.StringVar(value="description")
         self.batch_var = tk.IntVar(value=4)
@@ -58,9 +60,9 @@ class SpritePipeApp:
         self.lora_strength_var = tk.DoubleVar(value=DEFAULTS.pixel_lora_strength)
         self.timeout_var = tk.IntVar(value=900)
         self.dry_run_var = tk.BooleanVar(value=False)
-        self.llm_provider_var = tk.StringVar(value="none")
-        self.llm_model_var = tk.StringVar(value="")
-        self.llm_endpoint_var = tk.StringVar(value="")
+        self.llm_provider_var = tk.StringVar(value="ollama")
+        self.llm_model_var = tk.StringVar(value="qwen2.5:7b-instruct")
+        self.llm_endpoint_var = tk.StringVar(value="http://127.0.0.1:11434")
         self.status_var = tk.StringVar(value="Ready")
 
     def _build_ui(self) -> None:
@@ -93,10 +95,16 @@ class SpritePipeApp:
         ttk.Label(backend, text="ComfyUI").grid(row=0, column=0, sticky="w")
         ttk.Entry(backend, textvariable=self.comfy_url_var).grid(row=0, column=1, sticky="ew", padx=6)
         ttk.Button(backend, text="Validate", command=self.validate_comfy).grid(row=0, column=2)
-        ttk.Label(backend, text="Output").grid(row=1, column=0, sticky="w", pady=(6, 0))
-        ttk.Entry(backend, textvariable=self.output_dir_var).grid(row=1, column=1, sticky="ew", padx=6, pady=(6, 0))
-        ttk.Button(backend, text="Browse", command=self.browse_output_dir).grid(row=1, column=2, pady=(6, 0))
-        ttk.Checkbutton(backend, text="Dry run", variable=self.dry_run_var).grid(row=2, column=1, sticky="w", pady=(6, 0))
+        ttk.Label(backend, text="Models").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        ttk.Entry(backend, textvariable=self.models_root_var).grid(row=1, column=1, sticky="ew", padx=6, pady=(6, 0))
+        model_buttons = ttk.Frame(backend)
+        model_buttons.grid(row=1, column=2, sticky="ew", pady=(6, 0))
+        ttk.Button(model_buttons, text="Browse", command=self.browse_models_root).pack(side=tk.LEFT)
+        ttk.Button(model_buttons, text="Download Missing", command=self.download_missing_models).pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Label(backend, text="Output").grid(row=2, column=0, sticky="w", pady=(6, 0))
+        ttk.Entry(backend, textvariable=self.output_dir_var).grid(row=2, column=1, sticky="ew", padx=6, pady=(6, 0))
+        ttk.Button(backend, text="Browse", command=self.browse_output_dir).grid(row=2, column=2, pady=(6, 0))
+        ttk.Checkbutton(backend, text="Dry run", variable=self.dry_run_var).grid(row=3, column=1, sticky="w", pady=(6, 0))
 
         source = ttk.LabelFrame(parent, text="Input", padding=8)
         source.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
@@ -215,20 +223,58 @@ class SpritePipeApp:
 
     def validate_comfy(self) -> None:
         url = self.comfy_url_var.get().strip()
+        models_root = Path(self.models_root_var.get().strip() or default_models_root())
 
-        def work() -> str:
+        def work() -> dict[str, Any]:
             client = ComfyClient(url)
             missing_nodes = validate_required_nodes(client, required_node_types())
             if missing_nodes:
-                return "Missing nodes:\n" + "\n".join(f"- {node}" for node in missing_nodes)
+                return {"status": "missing_nodes", "missing_nodes": missing_nodes}
             missing_assets = validate_model_assets(client)
             if missing_assets:
-                lines = ["Core nodes are available. Missing model files:"]
-                lines.extend(f"- {label}: {name}" for label, name in missing_assets.items())
-                return "\n".join(lines)
-            return "ComfyUI is ready."
+                local_assets = assets_for_filenames(missing_assets.values())
+                local_missing = missing_local_assets(models_root, local_assets)
+                return {
+                    "status": "missing_assets",
+                    "missing_assets": missing_assets,
+                    "local_missing": local_missing,
+                    "models_root": models_root,
+                }
+            return {"status": "ready"}
 
-        self._run_worker("Validating", work, lambda result: messagebox.showinfo("ComfyUI", result))
+        self._run_worker("Validating", work, self._handle_validation_result)
+
+    def _handle_validation_result(self, result: dict[str, Any]) -> None:
+        status = result["status"]
+        if status == "missing_nodes":
+            lines = ["Missing ComfyUI nodes:"]
+            lines.extend(f"- {node}" for node in result["missing_nodes"])
+            messagebox.showerror("ComfyUI", "\n".join(lines))
+            return
+        if status == "ready":
+            messagebox.showinfo("ComfyUI", "ComfyUI is ready.")
+            return
+
+        missing_assets = result["missing_assets"]
+        local_missing = result["local_missing"]
+        models_root = result["models_root"]
+        lines = ["Core nodes are available, but ComfyUI does not see these model files:"]
+        lines.extend(f"- {label}: {name}" for label, name in missing_assets.items())
+        if not local_missing:
+            lines.append("")
+            lines.append("The files exist in the selected model folder. Refresh or restart ComfyUI, then validate again.")
+            messagebox.showinfo("ComfyUI", "\n".join(lines))
+            return
+
+        lines.append("")
+        lines.append(f"Download missing files to:\n{models_root}")
+        lines.append("")
+        lines.append("These downloads can be large.")
+        lines.append("")
+        lines.extend(f"- {asset.subdir}/{asset.filename}" for asset in local_missing)
+        should_download = messagebox.askyesno("Download models?", "\n".join(lines))
+        if should_download:
+            self._download_assets(local_missing, models_root)
 
     def preview_prompt(self) -> None:
         try:
@@ -312,6 +358,35 @@ class SpritePipeApp:
         path = filedialog.askdirectory(initialdir=str(Path(self.output_dir_var.get() or ".").resolve()))
         if path:
             self.output_dir_var.set(path)
+
+    def browse_models_root(self) -> None:
+        path = filedialog.askdirectory(initialdir=str(Path(self.models_root_var.get() or default_models_root()).resolve()))
+        if path:
+            self.models_root_var.set(path)
+
+    def download_missing_models(self) -> None:
+        models_root = Path(self.models_root_var.get().strip() or default_models_root())
+        assets = missing_local_assets(models_root)
+        if not assets:
+            messagebox.showinfo("Models", "All default model files already exist in the selected folder.")
+            return
+        lines = [f"Download missing files to:\n{models_root}", "", "These downloads can be large.", ""]
+        lines.extend(f"- {asset.subdir}/{asset.filename}" for asset in assets)
+        if messagebox.askyesno("Download models?", "\n".join(lines)):
+            self._download_assets(assets, models_root)
+
+    def _download_assets(self, assets, models_root: Path) -> None:
+        def work() -> list[Path]:
+            return download_assets(models_root, assets, progress=lambda message: self.events.put(("log", message)))
+
+        def done(paths: list[Path]) -> None:
+            messagebox.showinfo(
+                "Models",
+                "Download complete. Refresh or restart ComfyUI if Validate still cannot see the files.\n\n"
+                + "\n".join(str(path) for path in paths),
+            )
+
+        self._run_worker("Downloading models", work, done)
 
     def browse_run(self) -> None:
         path = filedialog.askdirectory(initialdir=str(Path(self.output_dir_var.get() or ".").resolve()))

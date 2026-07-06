@@ -26,3 +26,8 @@ Qwen-Image support.
 If the command reports missing model files, download those exact filenames into
 the folders above and restart or refresh ComfyUI so `/object_info` sees the new
 backend model lists.
+
+The GUI has the same check. Its `Models` field defaults to a discovered ComfyUI
+`models` folder, and `Validate` will offer to download missing default
+`.safetensors` files into the correct subfolders. These files can be large, so
+the GUI asks before downloading.

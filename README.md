@@ -39,6 +39,8 @@ uv run spritepipe-gui
 ```
 
 GUI 支持描述生成、直接 prompt、批量参数、候选预览、选择候选后反馈迭代，以及 ComfyUI 节点和模型文件校验。
+默认 prompt model 会选择本地 Ollama 的 `qwen2.5:7b-instruct`；如果不可用，会自动退回内置 prompt composer。
+GUI 里的 `Models` 默认指向本机可发现的 ComfyUI `models` 文件夹。点击 `Validate` 后，如果缺少默认 safetensors，会询问是否自动下载到该文件夹。
 
 启动 ComfyUI 后检查节点：
 此命令也会检查默认模型文件名是否出现在 ComfyUI 后端下拉列表中。
