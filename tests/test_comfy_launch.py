@@ -18,3 +18,15 @@ def test_build_comfy_launch_plan_prefers_windows_batch(tmp_path: Path):
 
     assert plan.label == "run_nvidia_gpu.bat"
     assert plan.command[:2] == ("cmd.exe", "/c")
+
+
+def test_build_comfy_launch_plan_uses_comfy_virtualenv(tmp_path: Path):
+    (tmp_path / "main.py").write_text("", encoding="utf-8")
+    python = tmp_path / ".venv" / "Scripts" / "python.exe"
+    python.parent.mkdir(parents=True)
+    python.write_text("", encoding="utf-8")
+
+    plan = build_comfy_launch_plan(tmp_path, "http://127.0.0.1:8188")
+
+    assert plan.label == "main.py"
+    assert plan.command[0] == str(python)

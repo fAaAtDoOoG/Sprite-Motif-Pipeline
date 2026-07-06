@@ -167,7 +167,7 @@ def start_comfyui_server(
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     log_handle = log_path.open("ab")
     try:
-        subprocess.Popen(
+        process = subprocess.Popen(
             plan.command,
             cwd=plan.cwd,
             stdout=log_handle,
@@ -187,6 +187,11 @@ def start_comfyui_server(
                 "comfy_dir": str(plan.root),
                 "log_path": str(log_path),
             }
+        exit_code = process.poll()
+        if exit_code is not None:
+            log_tail = _tail_text(log_path)
+            detail = f" Last log lines: {log_tail}" if log_tail else ""
+            raise RuntimeError(f"ComfyUI exited early with code {exit_code}.{detail} Check {log_path}.")
         time.sleep(2)
         _emit(progress, "waiting for ComfyUI")
 
@@ -257,8 +262,7 @@ def build_comfy_launch_plan(root: Path, base_url: str = DEFAULT_COMFY_URL) -> Co
 
     main_py = root / "main.py"
     if main_py.exists():
-        python_exe = root / "venv" / "Scripts" / "python.exe"
-        interpreter = str(python_exe) if python_exe.exists() else sys.executable
+        interpreter = _comfy_python(root)
         return ComfyLaunchPlan(
             command=(interpreter, str(main_py), "--listen", host, "--port", str(port)),
             cwd=root,
@@ -300,6 +304,27 @@ def _host_port(endpoint: str) -> tuple[str, int]:
     if host == "localhost":
         host = "127.0.0.1"
     return host, parsed.port or 8188
+
+
+def _comfy_python(root: Path) -> str:
+    candidates = (
+        root / ".venv" / "Scripts" / "python.exe",
+        root / "venv" / "Scripts" / "python.exe",
+        root / "python_embeded" / "python.exe",
+        root / "python_embedded" / "python.exe",
+    )
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+    return sys.executable
+
+
+def _tail_text(path: Path, max_chars: int = 2000) -> str:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    return text[-max_chars:].strip()
 
 
 def _emit(progress: ProgressCallback | None, message: str) -> None:
