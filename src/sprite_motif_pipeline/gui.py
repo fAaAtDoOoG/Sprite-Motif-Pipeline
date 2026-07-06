@@ -28,12 +28,68 @@ def main() -> None:
     root.mainloop()
 
 
+class ScrollableFrame(ttk.Frame):
+    def __init__(self, parent: tk.Widget, padding: int = 0):
+        super().__init__(parent)
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
+
+        self.canvas = tk.Canvas(self, highlightthickness=0, borderwidth=0)
+        self.scrollbar = ttk.Scrollbar(self, orient=tk.VERTICAL, command=self.canvas.yview)
+        self.content = ttk.Frame(self.canvas, padding=padding)
+        self.window_id = self.canvas.create_window((0, 0), window=self.content, anchor="nw")
+
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        self.scrollbar.grid(row=0, column=1, sticky="ns")
+
+        self.content.bind("<Configure>", self._on_content_configure)
+        self.canvas.bind("<Configure>", self._on_canvas_configure)
+        self.canvas.bind("<Enter>", self._bind_mousewheel)
+        self.canvas.bind("<Leave>", self._unbind_mousewheel)
+
+    def bind_mousewheel_to_descendants(self) -> None:
+        self._bind_tree(self.content)
+
+    def _bind_tree(self, widget: tk.Widget) -> None:
+        widget.bind("<Enter>", self._bind_mousewheel, add="+")
+        widget.bind("<Leave>", self._unbind_mousewheel, add="+")
+        for child in widget.winfo_children():
+            self._bind_tree(child)
+
+    def _on_content_configure(self, _event: tk.Event) -> None:
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+    def _on_canvas_configure(self, event: tk.Event) -> None:
+        self.canvas.itemconfigure(self.window_id, width=event.width)
+
+    def _bind_mousewheel(self, _event: tk.Event) -> None:
+        self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+        self.canvas.bind_all("<Button-4>", self._on_mousewheel)
+        self.canvas.bind_all("<Button-5>", self._on_mousewheel)
+
+    def _unbind_mousewheel(self, _event: tk.Event) -> None:
+        self.canvas.unbind_all("<MouseWheel>")
+        self.canvas.unbind_all("<Button-4>")
+        self.canvas.unbind_all("<Button-5>")
+
+    def _on_mousewheel(self, event: tk.Event) -> None:
+        delta = getattr(event, "delta", 0)
+        if delta:
+            self.canvas.yview_scroll(int(-1 * (delta / 120)), "units")
+            return
+        if getattr(event, "num", None) == 4:
+            self.canvas.yview_scroll(-3, "units")
+        elif getattr(event, "num", None) == 5:
+            self.canvas.yview_scroll(3, "units")
+
+
 class SpritePipeApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("Sprite Motif Pipeline")
         self.root.geometry("1180x780")
-        self.root.minsize(980, 680)
+        self.root.minsize(760, 520)
 
         self.events: queue.Queue[tuple[str, Any]] = queue.Queue()
         self.current_run_dir: Path | None = None
@@ -77,13 +133,15 @@ class SpritePipeApp:
         pane = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
         pane.grid(row=0, column=0, sticky="nsew")
 
-        left = ttk.Frame(pane, padding=10)
-        right = ttk.Frame(pane, padding=10)
+        left = ScrollableFrame(pane, padding=10)
+        right = ScrollableFrame(pane, padding=10)
         pane.add(left, weight=3)
         pane.add(right, weight=4)
 
-        self._build_left(left)
-        self._build_right(right)
+        self._build_left(left.content)
+        self._build_right(right.content)
+        left.bind_mousewheel_to_descendants()
+        right.bind_mousewheel_to_descendants()
         self._build_log()
 
     def _build_left(self, parent: ttk.Frame) -> None:
