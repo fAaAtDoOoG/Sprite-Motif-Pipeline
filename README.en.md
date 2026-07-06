@@ -36,6 +36,8 @@ Model setup is documented in [docs/model_setup.md](docs/model_setup.md). The def
 
 ## Browser GUI
 
+On Windows, you can double-click `start_gui.bat` in the project root. It sets UTF-8, checks for `uv`, and launches the default browser GUI. If something is already running on port 7865, it opens the existing page.
+
 Launch the default GUI:
 
 ```powershell
