@@ -543,7 +543,7 @@ INDEX_HTML = """<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Sprite Motif Pipeline</title>
-  <link rel="stylesheet" href="/style.css?v=4">
+  <link rel="stylesheet" href="/style.css?v=5">
 </head>
 <body>
   <header class="topbar">
@@ -631,9 +631,35 @@ INDEX_HTML = """<!doctype html>
           <div class="section-title">Candidates</div>
           <div id="candidateList" class="candidate-list"></div>
         </aside>
-        <figure class="image-stage">
-          <img id="previewImage" alt="">
-        </figure>
+        <div class="viewer-shell">
+          <div class="viewer-toolbar">
+            <button id="moveTool" class="active" title="Move view">Move</button>
+            <button id="panLeft" title="Move left">←</button>
+            <button id="panUp" title="Move up">↑</button>
+            <button id="panDown" title="Move down">↓</button>
+            <button id="panRight" title="Move right">→</button>
+            <button id="zoomOut" title="Zoom out">−</button>
+            <button id="zoomIn" title="Zoom in">+</button>
+            <button id="fitView" title="Fit view">Fit</button>
+            <button id="actualSize" title="Actual size">1:1</button>
+            <span id="zoomText">100%</span>
+          </div>
+          <figure id="viewerStage" class="image-stage">
+            <div id="viewerCanvas" class="viewer-canvas">
+              <div id="comparisonView" class="comparison-view">
+                <div id="highPane" class="compare-pane">
+                  <div id="highLabel" class="compare-label">High res</div>
+                  <img id="highPreview" alt="">
+                </div>
+                <div id="lowPane" class="compare-pane">
+                  <div id="lowLabel" class="compare-label">Low res</div>
+                  <img id="lowPreview" alt="">
+                </div>
+              </div>
+              <img id="previewImage" class="contact-preview" alt="">
+            </div>
+          </figure>
+        </div>
       </div>
 
       <div class="filebar">
@@ -660,7 +686,7 @@ INDEX_HTML = """<!doctype html>
       </div>
     </section>
   </main>
-  <script src="/app.js?v=4"></script>
+  <script src="/app.js?v=5"></script>
 </body>
 </html>
 """
@@ -877,17 +903,90 @@ button.danger:hover {
   color: var(--muted);
   overflow-wrap: anywhere;
 }
+.viewer-shell {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+.viewer-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  justify-content: flex-end;
+}
+.viewer-toolbar button {
+  min-width: 34px;
+  padding-inline: 9px;
+}
+.viewer-toolbar button.active {
+  background: var(--soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+#zoomText {
+  min-width: 48px;
+  color: var(--muted);
+  font-weight: 650;
+  text-align: right;
+}
 .image-stage {
   margin: 0;
-  display: grid;
-  place-items: center;
+  position: relative;
+  overflow: hidden;
   min-height: 460px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: #fbfaf7;
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
 }
-.image-stage img {
-  max-width: min(100%, 560px);
+.image-stage.dragging {
+  cursor: grabbing;
+}
+.viewer-canvas {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: max-content;
+  transform-origin: 0 0;
+  will-change: transform;
+}
+.comparison-view {
+  display: none;
+  gap: 14px;
+  align-items: flex-start;
+}
+.compare-pane {
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+}
+.compare-label {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+.compare-pane img {
+  display: block;
+  max-width: none;
+  max-height: none;
+  background: #fbfaf7;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+#lowPreview {
+  image-rendering: crisp-edges;
+  image-rendering: pixelated;
+}
+.contact-preview {
+  display: none;
+  max-width: min(100vw, 560px);
   max-height: 560px;
   image-rendering: pixelated;
 }
@@ -943,6 +1042,16 @@ let handledJob = 0;
 let heartbeatTimer = null;
 let pollTimer = null;
 let serverStopping = false;
+const viewerState = {
+  zoom: 1,
+  panX: 0,
+  panY: 0,
+  moveMode: true,
+  dragging: false,
+  lastX: 0,
+  lastY: 0,
+  contentReady: false
+};
 
 const $ = (id) => document.getElementById(id);
 
@@ -1025,6 +1134,123 @@ async function heartbeat() {
 function startHeartbeat() {
   heartbeat();
   heartbeatTimer = setInterval(heartbeat, 5000);
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function parseImageSize(value, fallback = { width: 1024, height: 1024 }) {
+  const match = String(value || "").trim().match(/^(\\d+)x(\\d+)$/i);
+  if (!match) return fallback;
+  return { width: Number(match[1]), height: Number(match[2]) };
+}
+
+function setImageBox(image, width, height) {
+  image.style.width = `${width}px`;
+  image.style.height = `${height}px`;
+}
+
+function hasViewerContent() {
+  return viewerState.contentReady;
+}
+
+function updateViewerTransform() {
+  $("viewerCanvas").style.transform = `translate(${viewerState.panX}px, ${viewerState.panY}px) scale(${viewerState.zoom})`;
+  $("zoomText").textContent = `${Math.round(viewerState.zoom * 100)}%`;
+}
+
+function setMoveMode(active) {
+  viewerState.moveMode = active;
+  $("moveTool").classList.toggle("active", active);
+}
+
+function setZoomAround(stageX, stageY, nextZoom) {
+  if (!hasViewerContent()) return;
+  nextZoom = clamp(nextZoom, 0.05, 8);
+  const contentX = (stageX - viewerState.panX) / viewerState.zoom;
+  const contentY = (stageY - viewerState.panY) / viewerState.zoom;
+  viewerState.zoom = nextZoom;
+  viewerState.panX = stageX - contentX * viewerState.zoom;
+  viewerState.panY = stageY - contentY * viewerState.zoom;
+  updateViewerTransform();
+}
+
+function zoomBy(factor) {
+  const stage = $("viewerStage");
+  setZoomAround(stage.clientWidth / 2, stage.clientHeight / 2, viewerState.zoom * factor);
+}
+
+function panViewer(dx, dy) {
+  if (!hasViewerContent()) return;
+  viewerState.panX += dx;
+  viewerState.panY += dy;
+  updateViewerTransform();
+}
+
+function fitViewer() {
+  if (!hasViewerContent()) return;
+  const stage = $("viewerStage");
+  const content = $("comparisonView").style.display !== "none" ? $("comparisonView") : $("previewImage");
+  const width = content.offsetWidth || 1;
+  const height = content.offsetHeight || 1;
+  const padding = 24;
+  viewerState.zoom = clamp(Math.min((stage.clientWidth - padding) / width, (stage.clientHeight - padding) / height, 1), 0.05, 8);
+  viewerState.panX = Math.round((stage.clientWidth - width * viewerState.zoom) / 2);
+  viewerState.panY = Math.round((stage.clientHeight - height * viewerState.zoom) / 2);
+  updateViewerTransform();
+}
+
+function actualSizeViewer() {
+  if (!hasViewerContent()) return;
+  viewerState.zoom = 1;
+  fitViewerCenterOnly();
+  updateViewerTransform();
+}
+
+function fitViewerCenterOnly() {
+  const stage = $("viewerStage");
+  const content = $("comparisonView").style.display !== "none" ? $("comparisonView") : $("previewImage");
+  const width = content.offsetWidth || 1;
+  const height = content.offsetHeight || 1;
+  viewerState.panX = Math.round((stage.clientWidth - width * viewerState.zoom) / 2);
+  viewerState.panY = Math.round((stage.clientHeight - height * viewerState.zoom) / 2);
+}
+
+function showContactPreview(url) {
+  viewerState.contentReady = Boolean(url);
+  $("comparisonView").style.display = "none";
+  $("previewImage").style.display = url ? "block" : "none";
+  $("previewImage").src = url || "";
+  if (url) requestAnimationFrame(fitViewer);
+}
+
+function showCandidateComparison(candidate) {
+  const highUrl = candidate.highres_path_url || "";
+  const lowUrl = candidate.lowres_path_url || "";
+  const hasHigh = Boolean(highUrl);
+  const hasLow = Boolean(lowUrl);
+  if (!hasHigh && !hasLow) {
+    showContactPreview(currentRun ? currentRun.contact_sheet_url : "");
+    return;
+  }
+
+  const highSize = parseImageSize(currentRun ? currentRun.high_res : "");
+  const lowSize = parseImageSize(currentRun ? currentRun.low_res : "", { width: 64, height: 64 });
+  viewerState.contentReady = true;
+  $("previewImage").style.display = "none";
+  $("comparisonView").style.display = "flex";
+  $("highPane").style.display = hasHigh ? "grid" : "none";
+  $("lowPane").style.display = hasLow ? "grid" : "none";
+  $("highPreview").src = highUrl;
+  $("lowPreview").src = lowUrl;
+  $("highPreview").draggable = false;
+  $("lowPreview").draggable = false;
+  setImageBox($("highPreview"), highSize.width, highSize.height);
+  setImageBox($("lowPreview"), highSize.width, highSize.height);
+  $("highLabel").textContent = `High res ${highSize.width}x${highSize.height}`;
+  $("lowLabel").textContent = `Low res ${lowSize.width}x${lowSize.height} -> ${highSize.width}x${highSize.height}`;
+  requestAnimationFrame(fitViewer);
 }
 
 function applyDefaults(data) {
@@ -1256,8 +1482,11 @@ function renderRun(run) {
     item.onclick = () => selectCandidate(candidate.index);
     $("candidateList").appendChild(item);
   }
-  if (run.contact_sheet_url) $("previewImage").src = run.contact_sheet_url;
-  selectCandidate(selectedIndex);
+  if (run.candidates.length) {
+    selectCandidate(selectedIndex);
+  } else {
+    showContactPreview(run.contact_sheet_url || "");
+  }
   appendLog(`loaded=${run.run_dir}`);
 }
 
@@ -1267,7 +1496,7 @@ function selectCandidate(index) {
   document.querySelectorAll(".candidate").forEach((item) => item.classList.toggle("active", Number(item.dataset.index) === selectedIndex));
   const candidate = currentRun.candidates.find((item) => item.index === selectedIndex);
   if (!candidate) return;
-  $("previewImage").src = candidate.lowres_path_url || candidate.highres_path_url || currentRun.contact_sheet_url || "";
+  showCandidateComparison(candidate);
   $("lowLink").href = candidate.lowres_path_url || "#";
   $("highLink").href = candidate.highres_path_url || "#";
   $("apiLink").href = candidate.api_prompt_path_url || "#";
@@ -1277,6 +1506,56 @@ function selectCandidate(index) {
 async function openRun() {
   if (!currentRun) return;
   await api("/api/open-path", { path: currentRun.run_dir });
+}
+
+function bindViewer() {
+  const stage = $("viewerStage");
+  stage.addEventListener("wheel", (event) => {
+    if (!hasViewerContent()) return;
+    event.preventDefault();
+    const rect = stage.getBoundingClientRect();
+    const factor = event.deltaY < 0 ? 1.12 : 0.88;
+    setZoomAround(event.clientX - rect.left, event.clientY - rect.top, viewerState.zoom * factor);
+  }, { passive: false });
+
+  stage.addEventListener("pointerdown", (event) => {
+    if (!hasViewerContent() || !viewerState.moveMode || event.button !== 0) return;
+    viewerState.dragging = true;
+    viewerState.lastX = event.clientX;
+    viewerState.lastY = event.clientY;
+    stage.classList.add("dragging");
+    stage.setPointerCapture(event.pointerId);
+    event.preventDefault();
+  });
+
+  stage.addEventListener("pointermove", (event) => {
+    if (!viewerState.dragging) return;
+    panViewer(event.clientX - viewerState.lastX, event.clientY - viewerState.lastY);
+    viewerState.lastX = event.clientX;
+    viewerState.lastY = event.clientY;
+  });
+
+  function stopDrag(event) {
+    if (!viewerState.dragging) return;
+    viewerState.dragging = false;
+    stage.classList.remove("dragging");
+    if (stage.hasPointerCapture(event.pointerId)) stage.releasePointerCapture(event.pointerId);
+  }
+
+  stage.addEventListener("pointerup", stopDrag);
+  stage.addEventListener("pointercancel", stopDrag);
+  $("moveTool").onclick = () => setMoveMode(!viewerState.moveMode);
+  $("panLeft").onclick = () => panViewer(-80, 0);
+  $("panRight").onclick = () => panViewer(80, 0);
+  $("panUp").onclick = () => panViewer(0, -80);
+  $("panDown").onclick = () => panViewer(0, 80);
+  $("zoomOut").onclick = () => zoomBy(0.8);
+  $("zoomIn").onclick = () => zoomBy(1.25);
+  $("fitView").onclick = () => fitViewer();
+  $("actualSize").onclick = () => actualSizeViewer();
+  window.addEventListener("resize", () => {
+    if (hasViewerContent()) fitViewer();
+  });
 }
 
 async function stopServer() {
@@ -1349,6 +1628,7 @@ function bind() {
 async function start() {
   applyDefaults(await api("/api/defaults"));
   bind();
+  bindViewer();
   startHeartbeat();
   pollTimer = setInterval(pollJob, 800);
 }
