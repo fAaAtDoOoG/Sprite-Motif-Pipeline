@@ -37,6 +37,7 @@ Model setup is documented in [docs/model_setup.md](docs/model_setup.md). The def
 ## Browser GUI
 
 On Windows, you can double-click `start_gui.bat` in the project root. It sets UTF-8, checks for `uv`, and launches the default browser GUI. If something is already running on port 7865, it opens the existing page.
+The top bar includes `Stop Server` for manually stopping the local web server. `Auto stop on close` is enabled by default, so the local web server exits shortly after the browser page is closed; normal refreshes usually reconnect before the timeout.
 
 Launch the default GUI:
 

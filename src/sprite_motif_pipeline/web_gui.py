@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 import webbrowser
 from dataclasses import asdict, dataclass, field
 from http import HTTPStatus
@@ -39,13 +40,61 @@ class JobSnapshot:
 
 
 class WebAppState:
-    def __init__(self) -> None:
+    def __init__(self, *, auto_shutdown_after_s: int = 20) -> None:
         self.lock = threading.Lock()
         self.job = JobSnapshot()
+        self.server: ThreadingHTTPServer | None = None
+        self.auto_shutdown_after_s = max(8, int(auto_shutdown_after_s))
+        self.auto_shutdown_armed = False
+        self.last_heartbeat = 0.0
+        self.shutdown_requested = False
+        self.monitor_started = False
+
+    def attach_server(self, server: ThreadingHTTPServer) -> None:
+        with self.lock:
+            self.server = server
+
+    def start_auto_shutdown_monitor(self) -> None:
+        with self.lock:
+            if self.monitor_started:
+                return
+            self.monitor_started = True
+        threading.Thread(target=self._auto_shutdown_monitor, daemon=True).start()
 
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
             return asdict(self.job)
+
+    def heartbeat(self, *, auto_shutdown: bool = True) -> dict[str, Any]:
+        with self.lock:
+            self.auto_shutdown_armed = bool(auto_shutdown)
+            if auto_shutdown:
+                self.last_heartbeat = time.monotonic()
+            return {
+                "ok": True,
+                "auto_shutdown_enabled": self.auto_shutdown_armed,
+                "auto_shutdown_after_s": self.auto_shutdown_after_s,
+            }
+
+    def request_shutdown(self, reason: str, *, force: bool = False) -> dict[str, Any]:
+        with self.lock:
+            if self.job.active and not force:
+                raise RuntimeError("A job is still running. Wait for it to finish before stopping the server.")
+            if self.shutdown_requested:
+                return {"ok": True, "already_requested": True}
+            self.shutdown_requested = True
+            self.job.label = "Stopping server"
+            self.job.percent = 100
+            self.job.logs.append(f"server shutdown requested: {reason}")
+            server = self.server
+
+        def shutdown_target() -> None:
+            time.sleep(0.25)
+            if server is not None:
+                server.shutdown()
+
+        threading.Thread(target=shutdown_target, daemon=True).start()
+        return {"ok": True}
 
     def start(self, label: str, work: Callable[[Callable[[str, int | None], None]], dict[str, Any]]) -> dict[str, Any]:
         with self.lock:
@@ -85,16 +134,36 @@ class WebAppState:
         with self.lock:
             self.job.prompt = prompt
 
+    def _auto_shutdown_monitor(self) -> None:
+        while True:
+            time.sleep(2)
+            with self.lock:
+                if self.shutdown_requested:
+                    return
+                armed = self.auto_shutdown_armed
+                last_heartbeat = self.last_heartbeat
+                job_active = self.job.active
+
+            if armed and last_heartbeat and not job_active and time.monotonic() - last_heartbeat >= self.auto_shutdown_after_s:
+                try:
+                    self.request_shutdown("browser page closed")
+                except RuntimeError:
+                    continue
+                return
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="spritepipe-web", description="Launch the Sprite Motif browser UI.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=7865)
     parser.add_argument("--no-browser", action="store_true")
+    parser.add_argument("--auto-shutdown-after", type=int, default=20, help="Seconds without browser heartbeat before auto-stopping the local web server.")
     args = parser.parse_args(argv)
 
-    state = WebAppState()
+    state = WebAppState(auto_shutdown_after_s=args.auto_shutdown_after)
     server = ThreadingHTTPServer((args.host, args.port), make_handler(state))
+    state.attach_server(server)
+    state.start_auto_shutdown_monitor()
     url = f"http://{args.host}:{args.port}/"
     print(f"Sprite Motif web GUI: {url}")
     if not args.no_browser:
@@ -141,7 +210,14 @@ def make_handler(state: WebAppState) -> type[BaseHTTPRequestHandler]:
             parsed = urlparse(self.path)
             try:
                 payload = self._read_json()
-                if parsed.path == "/api/validate-comfy":
+                if parsed.path == "/api/heartbeat":
+                    self._send_json(state.heartbeat(auto_shutdown=bool(payload.get("auto_shutdown", True))))
+                elif parsed.path == "/api/shutdown":
+                    try:
+                        self._send_json(state.request_shutdown("manual", force=bool(payload.get("force"))))
+                    except RuntimeError as exc:
+                        self._send_json({"error": str(exc)}, status=409)
+                elif parsed.path == "/api/validate-comfy":
                     self._send_json(validate_comfy_response(payload))
                 elif parsed.path == "/api/download-models":
                     self._send_json(state.start("Downloading ComfyUI models", lambda progress: download_models_job(payload, progress)))
@@ -467,7 +543,7 @@ INDEX_HTML = """<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Sprite Motif Pipeline</title>
-  <link rel="stylesheet" href="/style.css?v=3">
+  <link rel="stylesheet" href="/style.css?v=4">
 </head>
 <body>
   <header class="topbar">
@@ -478,6 +554,10 @@ INDEX_HTML = """<!doctype html>
     <div class="progress-wrap">
       <progress id="jobProgress" max="100" value="0"></progress>
       <span id="progressText">0%</span>
+    </div>
+    <div class="server-actions">
+      <label class="check"><input id="autoStop" type="checkbox" checked> Auto stop on close</label>
+      <button id="stopServer" class="danger">Stop Server</button>
     </div>
   </header>
 
@@ -580,7 +660,7 @@ INDEX_HTML = """<!doctype html>
       </div>
     </section>
   </main>
-  <script src="/app.js?v=3"></script>
+  <script src="/app.js?v=4"></script>
 </body>
 </html>
 """
@@ -636,6 +716,13 @@ h1 {
   display: grid;
   grid-template-columns: minmax(180px, 320px) 46px;
   gap: 10px;
+  align-items: center;
+}
+.server-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
   align-items: center;
 }
 progress {
@@ -709,6 +796,14 @@ button, .filebar a {
 button:hover, .filebar a:hover {
   border-color: var(--accent);
   color: var(--accent);
+}
+button.danger {
+  border-color: #cf9b92;
+  color: var(--accent-2);
+}
+button.danger:hover {
+  background: #fff3f0;
+  border-color: var(--accent-2);
 }
 .primary button:last-child {
   background: var(--accent);
@@ -845,6 +940,9 @@ const fields = [
 let currentRun = null;
 let selectedIndex = 0;
 let handledJob = 0;
+let heartbeatTimer = null;
+let pollTimer = null;
+let serverStopping = false;
 
 const $ = (id) => document.getElementById(id);
 
@@ -908,6 +1006,25 @@ function appendLog(message) {
   const box = $("logBox");
   box.textContent += `${message}\\n`;
   box.scrollTop = box.scrollHeight;
+}
+
+function autoStopEnabled() {
+  const checkbox = $("autoStop");
+  return checkbox ? checkbox.checked : true;
+}
+
+async function heartbeat() {
+  try {
+    await api("/api/heartbeat", { auto_shutdown: autoStopEnabled() });
+  } catch (error) {
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+  }
+}
+
+function startHeartbeat() {
+  heartbeat();
+  heartbeatTimer = setInterval(heartbeat, 5000);
 }
 
 function applyDefaults(data) {
@@ -1162,6 +1279,24 @@ async function openRun() {
   await api("/api/open-path", { path: currentRun.run_dir });
 }
 
+async function stopServer() {
+  if (!confirm("Stop the local Sprite Motif server? The web UI will disconnect.")) return;
+  setStatus("Stopping server", 100);
+  try {
+    await api("/api/shutdown", { force: false });
+    appendLog("server shutdown requested");
+    serverStopping = true;
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
+    if (pollTimer) clearInterval(pollTimer);
+    heartbeatTimer = null;
+    pollTimer = null;
+    setTimeout(() => setStatus("Server stopped", 100), 800);
+  } catch (error) {
+    setStatus("Stop cancelled", 100);
+    alert(error.message);
+  }
+}
+
 async function pollJob() {
   try {
     const job = await api("/api/job");
@@ -1182,6 +1317,7 @@ async function pollJob() {
       if (job.result && job.result.kind === "model_download") appendLog(`downloaded=${job.result.paths.join(", ")}`);
     }
   } catch (error) {
+    if (serverStopping) return;
     setStatus(error.message, 0);
   }
 }
@@ -1206,12 +1342,15 @@ function bind() {
   $("latestRun").onclick = () => loadLatest().catch((error) => alert(error.message));
   $("loadRun").onclick = () => loadRunPath().catch((error) => alert(error.message));
   $("openRun").onclick = () => openRun().catch((error) => alert(error.message));
+  $("stopServer").onclick = () => stopServer().catch((error) => alert(error.message));
+  $("autoStop").onchange = () => heartbeat();
 }
 
 async function start() {
   applyDefaults(await api("/api/defaults"));
   bind();
-  setInterval(pollJob, 800);
+  startHeartbeat();
+  pollTimer = setInterval(pollJob, 800);
 }
 
 start().catch((error) => alert(error.message));
