@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sprite-motif-pipeline"
+version = "0.1.0"
+description = "Qwen-Image-2512 + Pixel Art LoRA pipeline for iterative 2D pixel-game character motifs."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+authors = [
+  { name = "sprite-motif-pipeline contributors" }
+]
+keywords = ["comfyui", "qwen-image", "pixel-art", "text-to-image", "game-sprites"]
+dependencies = [
+  "pillow>=10.0.0",
+  "requests>=2.31.0"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0"
+]
+
+[project.scripts]
+spritepipe = "sprite_motif_pipeline.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+sprite_motif_pipeline = ["prompt_training_examples.jsonl"]

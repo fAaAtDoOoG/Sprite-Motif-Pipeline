@@ -1,0 +1,17 @@
+sprite-motif-pipeline
+Copyright 2026 sprite-motif-pipeline contributors
+
+This repository contains pipeline code, prompt templates, tests, and documentation.
+It does not include, redistribute, or sublicense model weights.
+
+Referenced external models:
+
+- Qwen/Qwen-Image-2512 is published by the Qwen team under Apache-2.0.
+- prithivMLmods/Qwen-Image-2512-Pixel-Art-LoRA is published on Hugging Face
+  under Apache-2.0 and targets Qwen/Qwen-Image-2512.
+- ComfyUI workflow templates and node names are referenced for interoperability;
+  users must install ComfyUI and model files separately under their applicable
+  licenses and terms.
+
+Users are responsible for complying with the license terms of any model,
+LoRA, dataset, prompt provider, or hosted inference service they choose to use.
