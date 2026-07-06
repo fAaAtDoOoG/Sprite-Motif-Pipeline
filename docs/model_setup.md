@@ -42,6 +42,19 @@ reachable and whether the selected model exists. If the model is missing, the UI
 can pull it with Ollama. The same download is available through `Download Prompt
 Model`.
 
+`Preview Prompt` runs through the same background job/progress bar system as
+generation. By default the project sends `keep_alive=0` to Ollama prompt-rewrite
+requests, which unloads the prompt model after use and lowers memory pressure.
+Use `Unload Prompt Model` in the browser GUI to explicitly free the selected
+Ollama prompt model. If you prefer keeping it warm for repeated edits, set:
+
+```powershell
+$env:SPRITEPIPE_LLM_KEEP_ALIVE="5m"
+```
+
+This setting only affects the prompt LLM. ComfyUI may still retain image model
+weights separately.
+
 You can also install it manually:
 
 ```powershell

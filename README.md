@@ -48,6 +48,7 @@ uv run spritepipe-web --port 7865
 
 网页 GUI 支持描述生成、直接 prompt、批量参数、候选预览、选择候选后反馈迭代，以及 ComfyUI 节点和模型文件校验。
 默认 prompt model 会选择本地 Ollama 的 `qwen2.5:7b-instruct`。网页中的 `Validate Prompt Model` 会检查 Ollama 服务和模型，缺少模型时可直接拉取；下载和生成过程都会显示进度条与日志。网页 GUI 在 `Provider = ollama` 时会在预览、生成和迭代前先校验 prompt model，避免误以为用了 LLM 但实际走了 fallback；如果想显式使用内置规则，把 `Provider` 改成 `none`。
+`Preview Prompt` 现在也会作为后台任务运行并更新顶部进度条，不会在等待本地 LLM 时看起来像没反应。默认情况下，pipeline 会给 Ollama prompt rewrite 请求发送 `keep_alive=0`，让 prompt model 用完后立即卸载；网页里也有 `Unload Prompt Model` 按钮可以手动释放。若你希望连续改 prompt 时更快、且机器内存足够，可以在启动 GUI 前设置 `$env:SPRITEPIPE_LLM_KEEP_ALIVE="5m"`。
 GUI 里的 `Models` 默认指向本机可发现的 ComfyUI `models` 文件夹。点击 `Validate ComfyUI` 后，如果缺少默认 safetensors，会询问是否自动下载到该文件夹。
 
 旧版 Tk 桌面窗口仍然保留：
@@ -120,6 +121,8 @@ $env:SPRITEPIPE_LLM_PROVIDER="ollama"
 $env:SPRITEPIPE_LLM_ENDPOINT="http://127.0.0.1:11434"
 $env:SPRITEPIPE_LLM_MODEL="qwen2.5:7b-instruct"
 ```
+
+默认 `SPRITEPIPE_LLM_KEEP_ALIVE="0"`，也就是每次 prompt rewrite 完成后释放 Ollama prompt model，降低内存占用。可以改成 `"5m"`、`"30m"` 或 `"-1"` 来保留热加载；这只影响 prompt LLM，不会卸载 ComfyUI 里的 Qwen-Image 主模型。
 
 内置的 prompt curriculum 在 `src/sprite_motif_pipeline/prompt_training_examples.jsonl`。它既作为运行时 few-shot 示例，也可以作为后续微调 prompt LLM 的 starter 数据。
 

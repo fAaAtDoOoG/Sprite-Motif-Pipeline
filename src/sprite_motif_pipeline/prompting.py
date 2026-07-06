@@ -44,6 +44,7 @@ class LLMConfig:
     api_key: str = ""
     temperature: float = 0.2
     timeout_s: int = 60
+    keep_alive: str | int = "0"
 
     @classmethod
     def from_env(cls) -> "LLMConfig":
@@ -55,6 +56,7 @@ class LLMConfig:
             api_key=os.environ.get("SPRITEPIPE_LLM_API_KEY", "").strip(),
             temperature=float(os.environ.get("SPRITEPIPE_LLM_TEMPERATURE", "0.2")),
             timeout_s=int(os.environ.get("SPRITEPIPE_LLM_TIMEOUT", "60")),
+            keep_alive=os.environ.get("SPRITEPIPE_LLM_KEEP_ALIVE", "0").strip(),
         )
 
 
@@ -215,6 +217,7 @@ def _call_ollama(messages: list[dict[str, str]], config: LLMConfig) -> str:
                 "messages": messages,
                 "stream": False,
                 "format": "json",
+                "keep_alive": _coerce_keep_alive(config.keep_alive),
                 "options": {"temperature": config.temperature},
             },
             timeout=config.timeout_s,
@@ -280,3 +283,12 @@ def load_prompt_examples() -> Iterable[dict[str, str]]:
 
 def _clean_one_line(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
+
+
+def _coerce_keep_alive(value: str | int) -> str | int:
+    if isinstance(value, int):
+        return value
+    stripped = value.strip()
+    if re.fullmatch(r"-?\d+", stripped):
+        return int(stripped)
+    return stripped

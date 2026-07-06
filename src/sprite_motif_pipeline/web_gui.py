@@ -18,7 +18,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 from .comfy import ComfyClient, validate_model_assets, validate_required_nodes
 from .config import DEFAULT_HIGH_RES, DEFAULT_LOW_RES, DEFAULTS, format_size, parse_size
 from .model_assets import assets_for_filenames, default_models_root, download_assets, missing_local_assets
-from .ollama import DEFAULT_OLLAMA_ENDPOINT, pull_ollama_model, validate_ollama_model
+from .ollama import DEFAULT_OLLAMA_ENDPOINT, pull_ollama_model, unload_ollama_model, validate_ollama_model
 from .progress import generation_percent, percent_from_message, short_status
 from .prompting import LLMConfig, compose_prompt
 from .runner import GenerationOptions, generate_batch
@@ -149,8 +149,12 @@ def make_handler(state: WebAppState) -> type[BaseHTTPRequestHandler]:
                     self._send_json(validate_llm_response(payload))
                 elif parsed.path == "/api/download-llm":
                     self._send_json(state.start("Downloading prompt model", lambda progress: download_llm_job(payload, progress)))
+                elif parsed.path == "/api/unload-llm":
+                    self._send_json(state.start("Unloading prompt model", lambda progress: unload_llm_job(payload, progress)))
                 elif parsed.path == "/api/prompt":
                     self._send_json(prompt_response(payload))
+                elif parsed.path == "/api/preview-prompt":
+                    self._send_json(state.start("Previewing prompt", lambda progress: preview_prompt_job(payload, state, progress)))
                 elif parsed.path == "/api/generate":
                     self._send_json(state.start("Generating", lambda progress: generate_job(payload, state, progress)))
                 elif parsed.path == "/api/iterate":
@@ -275,9 +279,31 @@ def download_llm_job(payload: dict[str, Any], progress: Callable[[str, int | Non
     return {"kind": "llm_download", "model": model}
 
 
+def unload_llm_job(payload: dict[str, Any], progress: Callable[[str, int | None], None]) -> dict[str, Any]:
+    config = llm_config_from_payload(payload)
+    if config.provider != "ollama":
+        raise ValueError("Prompt model unload is available for Ollama providers.")
+    model = unload_ollama_model(config.endpoint, config.model, progress=lambda message: progress(message, percent_from_message(message)))
+    return {"kind": "llm_unload", "model": model}
+
+
 def prompt_response(payload: dict[str, Any]) -> dict[str, Any]:
     spec = compose_from_payload(payload)
     return {
+        "positive_prompt": spec.positive_prompt,
+        "negative_prompt": spec.negative_prompt,
+        "source": spec.source,
+        "notes": spec.notes,
+    }
+
+
+def preview_prompt_job(payload: dict[str, Any], state: WebAppState, progress: Callable[[str, int | None], None]) -> dict[str, Any]:
+    progress("Rewriting prompt with prompt model", 10)
+    spec = compose_from_payload(payload)
+    state.set_prompt(spec.positive_prompt)
+    progress("Prompt preview ready", 95)
+    return {
+        "kind": "prompt",
         "positive_prompt": spec.positive_prompt,
         "negative_prompt": spec.negative_prompt,
         "source": spec.source,
@@ -382,6 +408,7 @@ def llm_config_from_payload(payload: dict[str, Any]) -> LLMConfig:
         api_key=env_config.api_key,
         temperature=env_config.temperature,
         timeout_s=env_config.timeout_s,
+        keep_alive=env_config.keep_alive,
     )
 
 
@@ -440,7 +467,7 @@ INDEX_HTML = """<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Sprite Motif Pipeline</title>
-  <link rel="stylesheet" href="/style.css?v=2">
+  <link rel="stylesheet" href="/style.css?v=3">
 </head>
 <body>
   <header class="topbar">
@@ -497,6 +524,7 @@ INDEX_HTML = """<!doctype html>
       <div class="toolbar">
         <button id="validateLlm">Validate Prompt Model</button>
         <button id="downloadLlm">Download Prompt Model</button>
+        <button id="unloadLlm">Unload Prompt Model</button>
       </div>
 
       <div class="toolbar primary">
@@ -552,7 +580,7 @@ INDEX_HTML = """<!doctype html>
       </div>
     </section>
   </main>
-  <script src="/app.js?v=2"></script>
+  <script src="/app.js?v=3"></script>
 </body>
 </html>
 """
@@ -864,6 +892,13 @@ function setStatus(text, percent = null) {
   }
 }
 
+function setBusy(active) {
+  for (const id of ["previewPrompt", "generate", "iterate", "downloadLlm", "unloadLlm", "downloadModels"]) {
+    const element = $(id);
+    if (element) element.disabled = active;
+  }
+}
+
 function log(lines) {
   $("logBox").textContent = Array.isArray(lines) ? lines.join("\\n") : String(lines || "");
   $("logBox").scrollTop = $("logBox").scrollHeight;
@@ -911,7 +946,13 @@ async function validateComfy() {
   const missing = Object.values(result.missing_assets);
   appendLog(`Missing model files: ${missing.join(", ")}`);
   if (result.local_missing.length && confirm(`Download ${result.local_missing.length} missing model file(s)?`)) {
-    await api("/api/download-models", { ...payload(), filenames: missing });
+    setBusy(true);
+    try {
+      await api("/api/download-models", { ...payload(), filenames: missing });
+    } catch (error) {
+      setBusy(false);
+      throw error;
+    }
   }
 }
 
@@ -924,9 +965,15 @@ async function validateLlm() {
     return true;
   }
   if (result.status === "missing_model" && confirm(`Download prompt model ${result.result.model}?`)) {
-    await api("/api/download-llm", payload());
-    setStatus("Downloading prompt model", 0);
-    appendLog(`Downloading prompt model: ${result.result.model}`);
+    setBusy(true);
+    try {
+      await api("/api/download-llm", payload());
+      setStatus("Downloading prompt model", 0);
+      appendLog(`Downloading prompt model: ${result.result.model}`);
+    } catch (error) {
+      setBusy(false);
+      throw error;
+    }
     return false;
   }
   showPromptModelProblem(result);
@@ -942,28 +989,60 @@ async function downloadPromptModel() {
   }
   if (result.status === "missing_model") {
     if (confirm(`Download prompt model ${result.result.model}? This can be several GB.`)) {
-      await api("/api/download-llm", payload());
-      setStatus("Downloading prompt model", 0);
-      appendLog(`Downloading prompt model: ${result.result.model}`);
+      setBusy(true);
+      try {
+        await api("/api/download-llm", payload());
+        setStatus("Downloading prompt model", 0);
+        appendLog(`Downloading prompt model: ${result.result.model}`);
+      } catch (error) {
+        setBusy(false);
+        throw error;
+      }
     }
     return;
   }
   showPromptModelProblem(result);
 }
 
+async function unloadPromptModel() {
+  const data = payload();
+  if (data.llm_provider !== "ollama") return alert("Prompt model unload is available for Ollama providers.");
+  if (!confirm(`Unload prompt model ${data.llm_model} from memory?`)) return;
+  setBusy(true);
+  setStatus("Unloading prompt model", 0);
+  try {
+    const result = await api("/api/unload-llm", data);
+    handledJob = 0;
+    appendLog(`job=${result.job_id}`);
+  } catch (error) {
+    setBusy(false);
+    throw error;
+  }
+}
+
 async function ensurePromptModelReady() {
   const data = payload();
   if (data.mode === "prompt" || data.llm_provider === "none" || data.llm_provider !== "ollama") return true;
+  setBusy(true);
+  setStatus("Validating prompt model", 0);
   const result = await api("/api/validate-llm", data);
   if (result.status === "ready") return true;
   if (result.status === "missing_model") {
     if (confirm(`Prompt model ${result.result.model} is missing. Download it now?`)) {
-      await api("/api/download-llm", data);
-      setStatus("Downloading prompt model", 0);
-      appendLog(`Downloading prompt model: ${result.result.model}`);
+      try {
+        await api("/api/download-llm", data);
+        setStatus("Downloading prompt model", 0);
+        appendLog(`Downloading prompt model: ${result.result.model}`);
+        return false;
+      } catch (error) {
+        setBusy(false);
+        throw error;
+      }
     }
+    setBusy(false);
     return false;
   }
+  setBusy(false);
   showPromptModelProblem(result);
   return false;
 }
@@ -986,31 +1065,50 @@ function showPromptModelProblem(result) {
 }
 
 async function previewPrompt() {
-  if (!(await ensurePromptModelReady())) return;
-  const result = await api("/api/prompt", payload());
-  $("promptPreview").value = `${result.positive_prompt}\\n\\nNegative:\\n${result.negative_prompt}`;
-  appendLog(result.notes || `Prompt source: ${result.source}`);
+  try {
+    if (!(await ensurePromptModelReady())) return;
+    setBusy(true);
+    setStatus("Previewing prompt", 0);
+    const result = await api("/api/preview-prompt", payload());
+    handledJob = 0;
+    appendLog(`job=${result.job_id}`);
+  } catch (error) {
+    setBusy(false);
+    throw error;
+  }
 }
 
 async function generate() {
-  if (!(await ensurePromptModelReady())) return;
-  const result = await api("/api/generate", payload());
-  handledJob = 0;
-  appendLog(`job=${result.job_id}`);
+  try {
+    if (!(await ensurePromptModelReady())) return;
+    setBusy(true);
+    const result = await api("/api/generate", payload());
+    handledJob = 0;
+    appendLog(`job=${result.job_id}`);
+  } catch (error) {
+    setBusy(false);
+    throw error;
+  }
 }
 
 async function iterate() {
   if (!currentRun) return alert("Load a run first.");
-  if (!(await ensurePromptModelReady())) return;
-  const body = {
-    ...payload(),
-    run_dir: currentRun.run_dir,
-    selected_index: selectedIndex,
-    feedback: $("feedback").value
-  };
-  const result = await api("/api/iterate", body);
-  handledJob = 0;
-  appendLog(`job=${result.job_id}`);
+  try {
+    if (!(await ensurePromptModelReady())) return;
+    setBusy(true);
+    const body = {
+      ...payload(),
+      run_dir: currentRun.run_dir,
+      selected_index: selectedIndex,
+      feedback: $("feedback").value
+    };
+    const result = await api("/api/iterate", body);
+    handledJob = 0;
+    appendLog(`job=${result.job_id}`);
+  } catch (error) {
+    setBusy(false);
+    throw error;
+  }
 }
 
 async function loadLatest() {
@@ -1072,9 +1170,15 @@ async function pollJob() {
     if (job.prompt) $("promptPreview").value = job.prompt;
     if (!job.active && job.id !== handledJob) {
       handledJob = job.id;
+      setBusy(false);
       if (job.error) appendLog(`error=${job.error}`);
+      if (job.result && job.result.kind === "prompt") {
+        $("promptPreview").value = `${job.result.positive_prompt}\\n\\nNegative:\\n${job.result.negative_prompt}`;
+        appendLog(job.result.notes || `Prompt source: ${job.result.source}`);
+      }
       if (job.result && job.result.kind === "run") renderRun(job.result.run);
       if (job.result && job.result.kind === "llm_download") appendLog(`prompt_model=${job.result.model}`);
+      if (job.result && job.result.kind === "llm_unload") appendLog(`unloaded_prompt_model=${job.result.model}`);
       if (job.result && job.result.kind === "model_download") appendLog(`downloaded=${job.result.paths.join(", ")}`);
     }
   } catch (error) {
@@ -1086,11 +1190,16 @@ function bind() {
   $("validateComfy").onclick = () => validateComfy().catch((error) => alert(error.message));
   $("downloadModels").onclick = () => {
     if (confirm("Download missing default ComfyUI model files? These files can be large.")) {
-      api("/api/download-models", payload()).catch((error) => alert(error.message));
+      setBusy(true);
+      api("/api/download-models", payload()).catch((error) => {
+        setBusy(false);
+        alert(error.message);
+      });
     }
   };
   $("validateLlm").onclick = () => validateLlm().catch((error) => alert(error.message));
   $("downloadLlm").onclick = () => downloadPromptModel().catch((error) => alert(error.message));
+  $("unloadLlm").onclick = () => unloadPromptModel().catch((error) => alert(error.message));
   $("previewPrompt").onclick = () => previewPrompt().catch((error) => alert(error.message));
   $("generate").onclick = () => generate().catch((error) => alert(error.message));
   $("iterate").onclick = () => iterate().catch((error) => alert(error.message));

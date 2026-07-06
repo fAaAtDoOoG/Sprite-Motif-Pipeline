@@ -628,6 +628,7 @@ class SpritePipeApp:
             api_key=env_config.api_key,
             temperature=env_config.temperature,
             timeout_s=env_config.timeout_s,
+            keep_alive=env_config.keep_alive,
         )
 
     def _compose_from_ui(self):

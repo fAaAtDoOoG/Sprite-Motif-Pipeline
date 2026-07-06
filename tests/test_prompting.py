@@ -1,6 +1,6 @@
 import pytest
 
-from sprite_motif_pipeline.prompting import LLMConfig, compose_prompt
+from sprite_motif_pipeline.prompting import LLMConfig, _coerce_keep_alive, compose_prompt
 
 
 def test_fallback_prompt_enforces_pixel_sprite_constraints():
@@ -24,3 +24,11 @@ def test_llm_failure_can_be_strict_instead_of_fallback():
             llm_config=LLMConfig(provider="unsupported-local-model"),
             allow_fallback=False,
         )
+
+
+def test_ollama_keep_alive_defaults_to_unload(monkeypatch):
+    monkeypatch.delenv("SPRITEPIPE_LLM_KEEP_ALIVE", raising=False)
+
+    assert LLMConfig.from_env().keep_alive == "0"
+    assert _coerce_keep_alive("0") == 0
+    assert _coerce_keep_alive("5m") == "5m"

@@ -226,6 +226,7 @@ def _llm_config_from_args(args: argparse.Namespace) -> LLMConfig:
         api_key=config.api_key,
         temperature=config.temperature,
         timeout_s=config.timeout_s,
+        keep_alive=config.keep_alive,
     )
 
 

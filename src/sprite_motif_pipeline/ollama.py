@@ -198,6 +198,25 @@ def pull_ollama_model(endpoint: str, model: str, *, progress: ProgressCallback |
     return model
 
 
+def unload_ollama_model(endpoint: str, model: str, *, progress: ProgressCallback | None = None) -> str:
+    endpoint = normalize_ollama_endpoint(endpoint)
+    model = model.strip()
+    if not model:
+        raise ValueError("Ollama model name is empty.")
+    if not ollama_version(endpoint):
+        raise RuntimeError("Ollama is not running.")
+
+    _emit(progress, f"unload Ollama model {model}")
+    response = requests.post(
+        f"{endpoint}/api/chat",
+        json={"model": model, "messages": [], "keep_alive": 0},
+        timeout=30,
+    )
+    response.raise_for_status()
+    _emit(progress, f"unloaded Ollama model {model}")
+    return model
+
+
 def format_pull_progress(model: str, event: dict[str, object]) -> str:
     status = str(event.get("status", "")).strip()
     completed = _int_or_none(event.get("completed"))

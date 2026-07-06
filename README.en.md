@@ -10,6 +10,7 @@ An open-source txt2img pipeline for 2D pixel-art game character motifs. It uses 
 - Prompt composer: write a short description and the pipeline rewrites it into image-generation prompts for pixel character motifs.
 - Optional prompt LLM: supports Ollama and OpenAI-compatible chat APIs. If the LLM is unavailable, the deterministic built-in composer is used as a fallback.
 - Ollama validation and download: the web GUI can validate the local Ollama prompt model and pull the missing model.
+- Progress-tracked prompt preview: prompt rewriting runs as a background job, updates the shared progress bar, and can unload the Ollama prompt model after use.
 - ComfyUI model validation and download: the GUI validates required nodes and default `.safetensors` filenames, then can download missing files into the selected ComfyUI `models` folder.
 - Direct prompt mode: bypasses prompt rewriting and sends your prompt straight into the pipeline.
 - Batch generation: generates multiple candidates per run and saves high-res images, low-res sprites, ComfyUI API prompts, and a manifest.
@@ -60,7 +61,7 @@ The browser UI supports:
 
 - ComfyUI validation and missing `.safetensors` download.
 - Prompt model validation and Ollama model pull.
-- Prompt preview.
+- Prompt preview with progress feedback.
 - Batch generation with progress and logs.
 - Candidate preview, file links, and iteration feedback.
 
@@ -131,6 +132,14 @@ $env:SPRITEPIPE_LLM_MODEL="qwen2.5:7b-instruct"
 ```
 
 The browser GUI defaults to Ollama `qwen2.5:7b-instruct`. When `Provider = ollama`, the web UI validates the prompt model before previewing, generating, or iterating, so it will not silently use the deterministic fallback while you expect the LLM. If the model is missing, use `Validate Prompt Model` or `Download Prompt Model` in the web UI. To explicitly use the built-in deterministic composer, set `Provider` to `none`.
+
+Ollama can keep recently used models in memory. This project sends `keep_alive=0` for prompt rewriting by default, so the local prompt model unloads after each preview/generation request. The browser GUI also has an `Unload Prompt Model` button. If you prefer faster repeated prompt rewrites and have enough RAM/VRAM, set a longer value before launching the GUI:
+
+```powershell
+$env:SPRITEPIPE_LLM_KEEP_ALIVE="5m"
+```
+
+This only controls the prompt LLM. ComfyUI may still keep Qwen-Image model weights loaded for image generation.
 
 The built-in prompt curriculum is stored at `src/sprite_motif_pipeline/prompt_training_examples.jsonl`. It is used as few-shot runtime context and can also serve as starter data for future prompt-model fine-tuning.
 
