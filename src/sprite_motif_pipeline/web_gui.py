@@ -176,6 +176,7 @@ def make_handler(state: WebAppState) -> type[BaseHTTPRequestHandler]:
             data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
@@ -184,6 +185,7 @@ def make_handler(state: WebAppState) -> type[BaseHTTPRequestHandler]:
             data = text.encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", content_type)
+            self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
@@ -197,6 +199,7 @@ def make_handler(state: WebAppState) -> type[BaseHTTPRequestHandler]:
             data = path.read_bytes()
             self.send_response(200)
             self.send_header("Content-Type", content_type)
+            self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
@@ -313,6 +316,7 @@ def iterate_job(payload: dict[str, Any], state: WebAppState, progress: Callable[
         feedback=feedback,
         previous_prompt=candidate.positive_prompt,
         llm_config=config,
+        allow_fallback=config.provider in {"", "none"},
     )
     state.set_prompt(spec.positive_prompt)
     options = generation_options_from_payload(payload)
@@ -336,11 +340,13 @@ def compose_from_payload(payload: dict[str, Any]):
     text = str(payload.get("description") or payload.get("text") or "")
     direct = text if mode == "prompt" else None
     description = text if mode == "description" else None
+    config = llm_config_from_payload(payload)
     return compose_prompt(
         description,
         direct_prompt=direct,
         force_pixel_trigger=True,
-        llm_config=llm_config_from_payload(payload),
+        llm_config=config,
+        allow_fallback=config.provider in {"", "none"},
     )
 
 
@@ -434,7 +440,7 @@ INDEX_HTML = """<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Sprite Motif Pipeline</title>
-  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/style.css?v=2">
 </head>
 <body>
   <header class="topbar">
@@ -546,7 +552,7 @@ INDEX_HTML = """<!doctype html>
       </div>
     </section>
   </main>
-  <script src="/app.js"></script>
+  <script src="/app.js?v=2"></script>
 </body>
 </html>
 """
@@ -915,22 +921,79 @@ async function validateLlm() {
   if (result.status === "ready") {
     setStatus("Prompt model ready", 100);
     appendLog(`Prompt model ready: ${result.result.model}`);
-    return;
+    return true;
   }
   if (result.status === "missing_model" && confirm(`Download prompt model ${result.result.model}?`)) {
     await api("/api/download-llm", payload());
+    setStatus("Downloading prompt model", 0);
+    appendLog(`Downloading prompt model: ${result.result.model}`);
+    return false;
+  }
+  showPromptModelProblem(result);
+  return false;
+}
+
+async function downloadPromptModel() {
+  const result = await api("/api/validate-llm", payload());
+  if (result.status === "ready") {
+    setStatus("Prompt model ready", 100);
+    alert(`Prompt model is already ready: ${result.result.model}`);
     return;
   }
-  alert(result.result ? result.result.message : result.message);
+  if (result.status === "missing_model") {
+    if (confirm(`Download prompt model ${result.result.model}? This can be several GB.`)) {
+      await api("/api/download-llm", payload());
+      setStatus("Downloading prompt model", 0);
+      appendLog(`Downloading prompt model: ${result.result.model}`);
+    }
+    return;
+  }
+  showPromptModelProblem(result);
+}
+
+async function ensurePromptModelReady() {
+  const data = payload();
+  if (data.mode === "prompt" || data.llm_provider === "none" || data.llm_provider !== "ollama") return true;
+  const result = await api("/api/validate-llm", data);
+  if (result.status === "ready") return true;
+  if (result.status === "missing_model") {
+    if (confirm(`Prompt model ${result.result.model} is missing. Download it now?`)) {
+      await api("/api/download-llm", data);
+      setStatus("Downloading prompt model", 0);
+      appendLog(`Downloading prompt model: ${result.result.model}`);
+    }
+    return false;
+  }
+  showPromptModelProblem(result);
+  return false;
+}
+
+function showPromptModelProblem(result) {
+  const detail = result.result || {};
+  if (result.status === "server_unavailable") {
+    const endpoint = detail.endpoint || $("llmEndpoint").value;
+    let message = `Ollama is not reachable at ${endpoint}.\\n\\n`;
+    if (detail.cli_available) {
+      message += "Ollama was found, but the local server could not be started automatically. Start Ollama manually, then click Validate Prompt Model again.";
+    } else {
+      message += "Ollama was not found on this machine. Install Ollama first, then click Validate Prompt Model again.\\n\\nhttps://ollama.com/download";
+    }
+    alert(message);
+    appendLog(message);
+    return;
+  }
+  alert(detail.message || result.message || "Prompt model is not ready.");
 }
 
 async function previewPrompt() {
+  if (!(await ensurePromptModelReady())) return;
   const result = await api("/api/prompt", payload());
   $("promptPreview").value = `${result.positive_prompt}\\n\\nNegative:\\n${result.negative_prompt}`;
   appendLog(result.notes || `Prompt source: ${result.source}`);
 }
 
 async function generate() {
+  if (!(await ensurePromptModelReady())) return;
   const result = await api("/api/generate", payload());
   handledJob = 0;
   appendLog(`job=${result.job_id}`);
@@ -938,6 +1001,7 @@ async function generate() {
 
 async function iterate() {
   if (!currentRun) return alert("Load a run first.");
+  if (!(await ensurePromptModelReady())) return;
   const body = {
     ...payload(),
     run_dir: currentRun.run_dir,
@@ -1026,11 +1090,7 @@ function bind() {
     }
   };
   $("validateLlm").onclick = () => validateLlm().catch((error) => alert(error.message));
-  $("downloadLlm").onclick = () => {
-    if (confirm("Download the selected Ollama prompt model? This can be several GB.")) {
-      api("/api/download-llm", payload()).catch((error) => alert(error.message));
-    }
-  };
+  $("downloadLlm").onclick = () => downloadPromptModel().catch((error) => alert(error.message));
   $("previewPrompt").onclick = () => previewPrompt().catch((error) => alert(error.message));
   $("generate").onclick = () => generate().catch((error) => alert(error.message));
   $("iterate").onclick = () => iterate().catch((error) => alert(error.message));

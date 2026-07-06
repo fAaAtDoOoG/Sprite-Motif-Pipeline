@@ -130,7 +130,7 @@ $env:SPRITEPIPE_LLM_ENDPOINT="http://127.0.0.1:11434"
 $env:SPRITEPIPE_LLM_MODEL="qwen2.5:7b-instruct"
 ```
 
-The browser GUI defaults to Ollama `qwen2.5:7b-instruct`. If the model is missing, use `Validate Prompt Model` or `Download Prompt Model` in the web UI.
+The browser GUI defaults to Ollama `qwen2.5:7b-instruct`. When `Provider = ollama`, the web UI validates the prompt model before previewing, generating, or iterating, so it will not silently use the deterministic fallback while you expect the LLM. If the model is missing, use `Validate Prompt Model` or `Download Prompt Model` in the web UI. To explicitly use the built-in deterministic composer, set `Provider` to `none`.
 
 The built-in prompt curriculum is stored at `src/sprite_motif_pipeline/prompt_training_examples.jsonl`. It is used as few-shot runtime context and can also serve as starter data for future prompt-model fine-tuning.
 

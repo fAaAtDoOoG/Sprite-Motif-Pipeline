@@ -66,6 +66,7 @@ def compose_prompt(
     previous_prompt: str | None = None,
     llm_config: LLMConfig | None = None,
     force_pixel_trigger: bool = False,
+    allow_fallback: bool = True,
 ) -> PromptSpec:
     if direct_prompt:
         positive = _clean_one_line(direct_prompt)
@@ -87,6 +88,8 @@ def compose_prompt(
         try:
             return _compose_with_llm(clean_description, feedback, previous_prompt, config)
         except Exception as exc:  # noqa: BLE001 - fallback is an intentional UX feature.
+            if not allow_fallback:
+                raise
             fallback = _compose_fallback(clean_description, feedback, previous_prompt)
             return PromptSpec(
                 positive_prompt=fallback.positive_prompt,
