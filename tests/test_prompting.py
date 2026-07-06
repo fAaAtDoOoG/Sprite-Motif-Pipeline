@@ -1,5 +1,6 @@
 import pytest
 
+import sprite_motif_pipeline.prompting as prompting
 from sprite_motif_pipeline.prompting import LLMConfig, _coerce_keep_alive, compose_prompt
 
 
@@ -24,6 +25,56 @@ def test_llm_failure_can_be_strict_instead_of_fallback():
             llm_config=LLMConfig(provider="unsupported-local-model"),
             allow_fallback=False,
         )
+
+
+def test_llm_negative_prompt_is_preserved_and_enforced(monkeypatch):
+    def fake_call_ollama(messages, config):
+        return (
+            '{"positive_prompt":"Pixel Art, one original full-body shadow knight, static pose, centered, facing right, '
+            'plain neutral background, no readable text, designed to downscale cleanly to 64x64",'
+            '"negative_prompt":"extra swords, sunny cheerful mood"}'
+        )
+
+    monkeypatch.setattr(prompting, "_call_ollama", fake_call_ollama)
+
+    spec = compose_prompt(
+        "shadow knight with one broken sword",
+        llm_config=LLMConfig(provider="ollama", model="fake"),
+        allow_fallback=False,
+    )
+
+    assert "extra swords" in spec.negative_prompt
+    assert "photorealistic rendering" in spec.negative_prompt
+    assert "busy background" in spec.negative_prompt
+    assert "watermark" in spec.negative_prompt
+    assert spec.source == "ollama"
+
+
+def test_llm_receives_previous_negative_prompt(monkeypatch):
+    captured = {}
+
+    def fake_call_ollama(messages, config):
+        captured["messages"] = messages
+        return (
+            '{"positive_prompt":"Pixel Art, one original full-body mage, static pose, centered, facing right, '
+            'plain neutral background, no readable text, designed to downscale cleanly to 64x64",'
+            '"negative_prompt":"no staff glow"}'
+        )
+
+    monkeypatch.setattr(prompting, "_call_ollama", fake_call_ollama)
+
+    compose_prompt(
+        "forest mage",
+        previous_prompt="Pixel Art, forest mage with staff",
+        previous_negative_prompt="glowing staff, busy forest background",
+        feedback="remove glow",
+        llm_config=LLMConfig(provider="ollama", model="fake"),
+        allow_fallback=False,
+    )
+
+    payload = captured["messages"][1]["content"]
+    assert "previous_negative_prompt" in payload
+    assert "glowing staff" in payload
 
 
 def test_ollama_keep_alive_defaults_to_unload(monkeypatch):

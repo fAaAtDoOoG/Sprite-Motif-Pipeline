@@ -22,6 +22,8 @@ Hard requirements:
 - Describe exactly one full-body character, static, centered, facing right in side view or three-quarter side view.
 - Make the silhouette readable at 64x64: clean outline, limited palette, strong contrast, large simple shapes.
 - Prefer a neutral plain background and no readable text.
+- The negative prompt must be specific and useful. It must reject photorealism, 3D render style, painterly/soft rendering, blur, motion/action poses, busy backgrounds, readable text, logos, watermarks, and tiny clutter that would fail after 64x64 downscaling.
+- Tailor the negative prompt to the description and feedback when needed, for example excluding unwanted props, backgrounds, poses, styles, or motifs that conflict with the requested sprite.
 - Do not mention copyrighted characters, brands, logos, or living artists unless the user explicitly supplied them.
 - Preserve the user's core identity, costume, mood, and revision request.
 - If previous_prompt is provided, keep its successful character identity and only adjust the requested parts.
@@ -66,6 +68,7 @@ def compose_prompt(
     direct_prompt: str | None = None,
     feedback: str | None = None,
     previous_prompt: str | None = None,
+    previous_negative_prompt: str | None = None,
     llm_config: LLMConfig | None = None,
     force_pixel_trigger: bool = False,
     allow_fallback: bool = True,
@@ -88,7 +91,7 @@ def compose_prompt(
     config = llm_config or LLMConfig.from_env()
     if config.provider and config.provider != "none":
         try:
-            return _compose_with_llm(clean_description, feedback, previous_prompt, config)
+            return _compose_with_llm(clean_description, feedback, previous_prompt, previous_negative_prompt, config)
         except Exception as exc:  # noqa: BLE001 - fallback is an intentional UX feature.
             if not allow_fallback:
                 raise
@@ -144,11 +147,13 @@ def _compose_with_llm(
     description: str,
     feedback: str | None,
     previous_prompt: str | None,
+    previous_negative_prompt: str | None,
     config: LLMConfig,
 ) -> PromptSpec:
     user_payload = {
         "description": description,
         "previous_prompt": previous_prompt or "",
+        "previous_negative_prompt": previous_negative_prompt or "",
         "feedback": feedback or "",
         "examples": _select_examples(description, feedback),
     }
@@ -173,6 +178,7 @@ def _compose_with_llm(
         negative = DEFAULT_NEGATIVE_PROMPT
 
     positive = _enforce_core_constraints(positive)
+    negative = _enforce_negative_constraints(negative)
     return PromptSpec(
         positive_prompt=positive,
         negative_prompt=negative,
@@ -257,6 +263,26 @@ def _enforce_core_constraints(prompt: str) -> str:
     ]
     lower = prompt.lower()
     additions = [phrase for phrase in required_phrases if phrase not in lower]
+    if additions:
+        prompt = f"{prompt}, {', '.join(additions)}"
+    return prompt
+
+
+def _enforce_negative_constraints(prompt: str) -> str:
+    required_phrases = [
+        "photorealistic rendering",
+        "3D render",
+        "painterly brush strokes",
+        "blurry silhouette",
+        "dynamic pose",
+        "busy background",
+        "excessive tiny details",
+        "text",
+        "logo",
+        "watermark",
+    ]
+    lower = prompt.lower()
+    additions = [phrase for phrase in required_phrases if phrase.lower() not in lower]
     if additions:
         prompt = f"{prompt}, {', '.join(additions)}"
     return prompt

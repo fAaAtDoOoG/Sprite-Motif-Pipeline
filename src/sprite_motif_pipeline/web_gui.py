@@ -21,7 +21,7 @@ from .config import DEFAULT_HIGH_RES, DEFAULT_LOW_RES, DEFAULTS, format_size, pa
 from .model_assets import assets_for_filenames, default_models_root, download_assets, missing_local_assets
 from .ollama import DEFAULT_OLLAMA_ENDPOINT, pull_ollama_model, start_ollama_server, unload_ollama_model, validate_ollama_model
 from .progress import generation_percent, percent_from_message, short_status
-from .prompting import LLMConfig, compose_prompt
+from .prompting import LLMConfig, PromptSpec, compose_prompt
 from .runner import GenerationOptions, generate_batch
 from .session import Candidate, load_manifest, save_manifest
 from .workflow import required_node_types
@@ -402,7 +402,7 @@ def prompt_response(payload: dict[str, Any]) -> dict[str, Any]:
 def preview_prompt_job(payload: dict[str, Any], state: WebAppState, progress: Callable[[str, int | None], None]) -> dict[str, Any]:
     progress("Rewriting prompt with prompt model", 10)
     spec = compose_from_payload(payload)
-    state.set_prompt(spec.positive_prompt)
+    state.set_prompt(format_prompt_preview(spec))
     progress("Prompt preview ready", 95)
     return {
         "kind": "prompt",
@@ -415,7 +415,7 @@ def preview_prompt_job(payload: dict[str, Any], state: WebAppState, progress: Ca
 
 def generate_job(payload: dict[str, Any], state: WebAppState, progress: Callable[[str, int | None], None]) -> dict[str, Any]:
     spec = compose_from_payload(payload)
-    state.set_prompt(spec.positive_prompt)
+    state.set_prompt(format_prompt_preview(spec))
     options = generation_options_from_payload(payload)
     mode = str(payload.get("mode") or "description")
     text = str(payload.get("description") or payload.get("text") or "")
@@ -443,10 +443,11 @@ def iterate_job(payload: dict[str, Any], state: WebAppState, progress: Callable[
         manifest.description,
         feedback=feedback,
         previous_prompt=candidate.positive_prompt,
+        previous_negative_prompt=candidate.negative_prompt,
         llm_config=config,
         allow_fallback=config.provider in {"", "none"},
     )
-    state.set_prompt(spec.positive_prompt)
+    state.set_prompt(format_prompt_preview(spec))
     options = generation_options_from_payload(payload)
     new_run_dir = generate_batch(
         spec,
@@ -476,6 +477,10 @@ def compose_from_payload(payload: dict[str, Any]):
         llm_config=config,
         allow_fallback=config.provider in {"", "none"},
     )
+
+
+def format_prompt_preview(spec: PromptSpec) -> str:
+    return f"{spec.positive_prompt}\n\nNegative:\n{spec.negative_prompt}"
 
 
 def generation_options_from_payload(payload: dict[str, Any]) -> GenerationOptions:

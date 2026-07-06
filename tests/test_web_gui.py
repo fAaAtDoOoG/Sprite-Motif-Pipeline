@@ -1,6 +1,7 @@
 import pytest
 
-from sprite_motif_pipeline.web_gui import APP_JS, INDEX_HTML, WebAppState
+from sprite_motif_pipeline.prompting import PromptSpec
+from sprite_motif_pipeline.web_gui import APP_JS, INDEX_HTML, WebAppState, format_prompt_preview
 
 
 def test_heartbeat_can_arm_and_disarm_auto_shutdown():
@@ -40,3 +41,13 @@ def test_browser_ui_contains_local_server_start_controls():
     assert "startLlm" in INDEX_HTML
     assert "/api/start-comfy" in APP_JS
     assert "/api/start-llm" in APP_JS
+
+
+def test_prompt_preview_includes_negative_prompt():
+    spec = PromptSpec(
+        positive_prompt="Pixel Art, character",
+        negative_prompt="photorealistic rendering",
+        source="test",
+    )
+
+    assert format_prompt_preview(spec) == "Pixel Art, character\n\nNegative:\nphotorealistic rendering"
