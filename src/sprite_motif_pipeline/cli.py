@@ -2,15 +2,14 @@ from __future__ import annotations
 
 import argparse
 import json
-import random
 import sys
 from pathlib import Path
 
 from .comfy import ComfyClient, validate_model_assets, validate_required_nodes
 from .config import DEFAULT_HIGH_RES, DEFAULT_LOW_RES, DEFAULTS, format_size, parse_size
-from .postprocess import downscale_nearest, make_contact_sheet
 from .prompting import LLMConfig, compose_prompt
-from .session import Candidate, create_manifest, load_manifest, new_run_dir, save_manifest
+from .runner import GenerationOptions, generate_batch
+from .session import Candidate, load_manifest, save_manifest
 from .workflow import build_api_prompt, export_api_prompt, required_node_types
 
 
@@ -185,76 +184,28 @@ def _generate_batch(
     selected_index: int | None = None,
     feedback: str = "",
 ) -> Path:
-    high_res = parse_size(args.high_res, DEFAULT_HIGH_RES)
-    low_res = parse_size(args.low_res, DEFAULT_LOW_RES)
-    if args.batch_size <= 0:
-        raise ValueError("--batch-size must be positive")
-
-    run_dir = new_run_dir(args.output_dir)
-    manifest = create_manifest(
-        run_dir=run_dir,
+    return generate_batch(
+        prompt_spec,
         description=description,
-        prompt_spec=prompt_spec,
-        high_res=high_res,
-        low_res=low_res,
-        parent_run=parent_run,
-        feedback=feedback,
-    )
-    manifest.selected_index = selected_index
-
-    api_dir = run_dir / "api_prompts"
-    high_dir = run_dir / "highres"
-    low_dir = run_dir / "lowres"
-    client = None if args.dry_run else ComfyClient(args.comfy_url)
-    seeds = _seeds(args.seed, args.batch_size)
-
-    for index, seed in enumerate(seeds):
-        stem = f"candidate_{index:02d}_seed_{seed}"
-        api_prompt = build_api_prompt(
-            positive_prompt=prompt_spec.positive_prompt,
-            negative_prompt=prompt_spec.negative_prompt,
-            width=high_res[0],
-            height=high_res[1],
-            seed=seed,
-            filename_prefix=f"sprite_motif/{run_dir.name}/{stem}",
-            lora_name=args.lora_name,
-            lora_strength=args.lora_strength,
+        options=GenerationOptions(
+            batch_size=args.batch_size,
+            high_res=args.high_res,
+            low_res=args.low_res,
+            seed=args.seed,
             steps=args.steps,
             cfg=args.cfg,
-        )
-        api_path = api_dir / f"{stem}.json"
-        export_api_prompt(api_path, api_prompt)
-
-        candidate = Candidate(
-            index=index,
-            seed=seed,
-            positive_prompt=prompt_spec.positive_prompt,
-            negative_prompt=prompt_spec.negative_prompt,
-            api_prompt_path=str(api_path),
-        )
-
-        if client is not None:
-            prompt_id = client.queue_prompt(api_prompt)
-            history = client.wait_for_history(prompt_id, timeout_s=args.timeout)
-            downloaded = client.download_images(history, high_dir, stem)
-            high_path = downloaded[0]
-            low_path = downscale_nearest(high_path, low_dir / f"{stem}_{format_size(low_res)}.png", low_res)
-            candidate.prompt_id = prompt_id
-            candidate.highres_path = str(high_path)
-            candidate.lowres_path = str(low_path)
-            print(f"[{index}] prompt_id={prompt_id} seed={seed} lowres={low_path}")
-        else:
-            print(f"[{index}] dry-run seed={seed} api_prompt={api_path}")
-
-        manifest.candidates.append(candidate)
-        save_manifest(run_dir, manifest)
-
-    low_paths = [Path(candidate.lowres_path) for candidate in manifest.candidates if candidate.lowres_path]
-    if low_paths:
-        sheet = make_contact_sheet(low_paths, run_dir / "contact_sheet.png")
-        print(f"contact_sheet={sheet}")
-    save_manifest(run_dir, manifest)
-    return run_dir
+            lora_name=args.lora_name,
+            lora_strength=args.lora_strength,
+            comfy_url=args.comfy_url,
+            timeout=args.timeout,
+            output_dir=args.output_dir,
+            dry_run=args.dry_run,
+        ),
+        parent_run=parent_run,
+        selected_index=selected_index,
+        feedback=feedback,
+        progress=print,
+    )
 
 
 def _prompt_spec_from_args(args: argparse.Namespace):
@@ -276,13 +227,6 @@ def _llm_config_from_args(args: argparse.Namespace) -> LLMConfig:
         temperature=config.temperature,
         timeout_s=config.timeout_s,
     )
-
-
-def _seeds(base_seed: int | None, count: int) -> list[int]:
-    if base_seed is None:
-        rng = random.SystemRandom()
-        return [rng.randrange(0, 2**63 - 1) for _ in range(count)]
-    return [base_seed + offset for offset in range(count)]
 
 
 def _find_candidate(candidates: list[Candidate], index: int) -> Candidate:
