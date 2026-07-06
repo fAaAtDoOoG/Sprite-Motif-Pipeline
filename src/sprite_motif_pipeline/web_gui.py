@@ -16,10 +16,10 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlencode, urlparse
 
-from .comfy import ComfyClient, validate_model_assets, validate_required_nodes
+from .comfy import DEFAULT_COMFY_URL, ComfyClient, default_comfy_dir, start_comfyui_server, validate_model_assets, validate_required_nodes
 from .config import DEFAULT_HIGH_RES, DEFAULT_LOW_RES, DEFAULTS, format_size, parse_size
 from .model_assets import assets_for_filenames, default_models_root, download_assets, missing_local_assets
-from .ollama import DEFAULT_OLLAMA_ENDPOINT, pull_ollama_model, unload_ollama_model, validate_ollama_model
+from .ollama import DEFAULT_OLLAMA_ENDPOINT, pull_ollama_model, start_ollama_server, unload_ollama_model, validate_ollama_model
 from .progress import generation_percent, percent_from_message, short_status
 from .prompting import LLMConfig, compose_prompt
 from .runner import GenerationOptions, generate_batch
@@ -217,12 +217,16 @@ def make_handler(state: WebAppState) -> type[BaseHTTPRequestHandler]:
                         self._send_json(state.request_shutdown("manual", force=bool(payload.get("force"))))
                     except RuntimeError as exc:
                         self._send_json({"error": str(exc)}, status=409)
+                elif parsed.path == "/api/start-comfy":
+                    self._send_json(state.start("Starting ComfyUI", lambda progress: start_comfy_job(payload, progress)))
                 elif parsed.path == "/api/validate-comfy":
                     self._send_json(validate_comfy_response(payload))
                 elif parsed.path == "/api/download-models":
                     self._send_json(state.start("Downloading ComfyUI models", lambda progress: download_models_job(payload, progress)))
                 elif parsed.path == "/api/validate-llm":
                     self._send_json(validate_llm_response(payload))
+                elif parsed.path == "/api/start-llm":
+                    self._send_json(state.start("Starting Ollama", lambda progress: start_llm_job(payload, progress)))
                 elif parsed.path == "/api/download-llm":
                     self._send_json(state.start("Downloading prompt model", lambda progress: download_llm_job(payload, progress)))
                 elif parsed.path == "/api/unload-llm":
@@ -288,9 +292,11 @@ def make_handler(state: WebAppState) -> type[BaseHTTPRequestHandler]:
 
 
 def default_payload() -> dict[str, Any]:
+    models_root = default_models_root()
     return {
-        "comfy_url": "http://127.0.0.1:8188",
-        "models_root": str(default_models_root()),
+        "comfy_url": DEFAULT_COMFY_URL,
+        "comfy_dir": str(default_comfy_dir(models_root)),
+        "models_root": str(models_root),
         "output_dir": "runs",
         "mode": "description",
         "description": "red-haired woman knight, light armor, brave personality",
@@ -311,7 +317,7 @@ def default_payload() -> dict[str, Any]:
 
 
 def validate_comfy_response(payload: dict[str, Any]) -> dict[str, Any]:
-    client = ComfyClient(str(payload.get("comfy_url") or "http://127.0.0.1:8188"))
+    client = ComfyClient(str(payload.get("comfy_url") or DEFAULT_COMFY_URL))
     missing_nodes = validate_required_nodes(client, required_node_types())
     if missing_nodes:
         return {"status": "missing_nodes", "missing_nodes": missing_nodes}
@@ -331,6 +337,16 @@ def validate_comfy_response(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def start_comfy_job(payload: dict[str, Any], progress: Callable[[str, int | None], None]) -> dict[str, Any]:
+    result = start_comfyui_server(
+        str(payload.get("comfy_url") or DEFAULT_COMFY_URL),
+        comfy_dir=str(payload.get("comfy_dir") or ""),
+        models_root=str(payload.get("models_root") or default_models_root()),
+        progress=lambda message: progress(message, percent_from_message(message)),
+    )
+    return {"kind": "comfy_start", **result}
+
+
 def download_models_job(payload: dict[str, Any], progress: Callable[[str, int | None], None]) -> dict[str, Any]:
     models_root = Path(str(payload.get("models_root") or default_models_root()))
     filenames = [str(name) for name in payload.get("filenames", []) if str(name).strip()]
@@ -345,6 +361,16 @@ def validate_llm_response(payload: dict[str, Any]) -> dict[str, Any]:
         return {"status": "unsupported", "message": "Automatic local model validation is available for Ollama providers."}
     result = validate_ollama_model(config.endpoint, config.model)
     return {"status": "ready" if result.model_present else "missing_model" if result.server_available else "server_unavailable", "result": asdict(result)}
+
+
+def start_llm_job(payload: dict[str, Any], progress: Callable[[str, int | None], None]) -> dict[str, Any]:
+    config = llm_config_from_payload(payload)
+    if config.provider != "ollama":
+        raise ValueError("Automatic local server start is available for Ollama providers.")
+    ok = start_ollama_server(config.endpoint, progress=lambda message: progress(message, percent_from_message(message)))
+    if not ok:
+        raise RuntimeError("Ollama could not be started automatically.")
+    return {"kind": "llm_start", "endpoint": config.endpoint, "model": config.model}
 
 
 def download_llm_job(payload: dict[str, Any], progress: Callable[[str, int | None], None]) -> dict[str, Any]:
@@ -468,7 +494,7 @@ def generation_options_from_payload(payload: dict[str, Any]) -> GenerationOption
         cfg=float(payload.get("cfg") or DEFAULTS.cfg),
         lora_name=str(payload.get("lora_name") or DEFAULTS.pixel_lora),
         lora_strength=float(payload.get("lora_strength") or DEFAULTS.pixel_lora_strength),
-        comfy_url=str(payload.get("comfy_url") or "http://127.0.0.1:8188"),
+        comfy_url=str(payload.get("comfy_url") or DEFAULT_COMFY_URL),
         timeout=int(payload.get("timeout") or 900),
         output_dir=Path(str(payload.get("output_dir") or "runs")),
         dry_run=bool(payload.get("dry_run")),
@@ -543,7 +569,7 @@ INDEX_HTML = """<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Sprite Motif Pipeline</title>
-  <link rel="stylesheet" href="/style.css?v=5">
+  <link rel="stylesheet" href="/style.css?v=6">
 </head>
 <body>
   <header class="topbar">
@@ -567,9 +593,11 @@ INDEX_HTML = """<!doctype html>
       <div class="grid two">
         <label>ComfyUI<input id="comfyUrl"></label>
         <label>Output<input id="outputDir"></label>
+        <label class="wide">ComfyUI Folder<input id="comfyDir" placeholder="D:/AI/ComfyUI or ComfyUI_windows_portable"></label>
         <label class="wide">Models<input id="modelsRoot"></label>
       </div>
       <div class="toolbar">
+        <button id="startComfy">Start ComfyUI</button>
         <button id="validateComfy">Validate ComfyUI</button>
         <button id="downloadModels">Download Missing</button>
         <label class="check"><input id="dryRun" type="checkbox"> Dry run</label>
@@ -602,6 +630,7 @@ INDEX_HTML = """<!doctype html>
         <label class="wide">Endpoint<input id="llmEndpoint"></label>
       </div>
       <div class="toolbar">
+        <button id="startLlm">Start Ollama</button>
         <button id="validateLlm">Validate Prompt Model</button>
         <button id="downloadLlm">Download Prompt Model</button>
         <button id="unloadLlm">Unload Prompt Model</button>
@@ -686,7 +715,7 @@ INDEX_HTML = """<!doctype html>
       </div>
     </section>
   </main>
-  <script src="/app.js?v=5"></script>
+  <script src="/app.js?v=6"></script>
 </body>
 </html>
 """
@@ -1031,7 +1060,7 @@ button.danger:hover {
 
 APP_JS = """
 const fields = [
-  "comfyUrl", "modelsRoot", "outputDir", "description", "batchSize", "seed",
+  "comfyUrl", "comfyDir", "modelsRoot", "outputDir", "description", "batchSize", "seed",
   "steps", "highRes", "lowRes", "cfg", "loraName", "loraStrength", "timeout",
   "llmProvider", "llmModel", "llmEndpoint"
 ];
@@ -1071,6 +1100,7 @@ function payload() {
   const mode = document.querySelector("input[name='mode']:checked").value;
   return {
     comfy_url: $("comfyUrl").value,
+    comfy_dir: $("comfyDir").value,
     models_root: $("modelsRoot").value,
     output_dir: $("outputDir").value,
     mode,
@@ -1100,7 +1130,7 @@ function setStatus(text, percent = null) {
 }
 
 function setBusy(active) {
-  for (const id of ["previewPrompt", "generate", "iterate", "downloadLlm", "unloadLlm", "downloadModels"]) {
+  for (const id of ["previewPrompt", "generate", "iterate", "startComfy", "downloadLlm", "startLlm", "unloadLlm", "downloadModels"]) {
     const element = $(id);
     if (element) element.disabled = active;
   }
@@ -1255,6 +1285,7 @@ function showCandidateComparison(candidate) {
 
 function applyDefaults(data) {
   $("comfyUrl").value = data.comfy_url;
+  $("comfyDir").value = data.comfy_dir;
   $("modelsRoot").value = data.models_root;
   $("outputDir").value = data.output_dir;
   $("description").value = data.description;
@@ -1299,6 +1330,19 @@ async function validateComfy() {
   }
 }
 
+async function startComfy() {
+  setBusy(true);
+  setStatus("Starting ComfyUI", 0);
+  try {
+    const result = await api("/api/start-comfy", payload());
+    handledJob = 0;
+    appendLog(`job=${result.job_id}`);
+  } catch (error) {
+    setBusy(false);
+    throw error;
+  }
+}
+
 async function validateLlm() {
   setStatus("Validating prompt model", 0);
   const result = await api("/api/validate-llm", payload());
@@ -1321,6 +1365,21 @@ async function validateLlm() {
   }
   showPromptModelProblem(result);
   return false;
+}
+
+async function startLlm() {
+  const data = payload();
+  if (data.llm_provider !== "ollama") return alert("Start Ollama is available for Ollama providers.");
+  setBusy(true);
+  setStatus("Starting Ollama", 0);
+  try {
+    const result = await api("/api/start-llm", data);
+    handledJob = 0;
+    appendLog(`job=${result.job_id}`);
+  } catch (error) {
+    setBusy(false);
+    throw error;
+  }
 }
 
 async function downloadPromptModel() {
@@ -1591,6 +1650,8 @@ async function pollJob() {
         appendLog(job.result.notes || `Prompt source: ${job.result.source}`);
       }
       if (job.result && job.result.kind === "run") renderRun(job.result.run);
+      if (job.result && job.result.kind === "comfy_start") appendLog(`comfy=${job.result.message || job.result.status}`);
+      if (job.result && job.result.kind === "llm_start") appendLog(`ollama=${job.result.endpoint}`);
       if (job.result && job.result.kind === "llm_download") appendLog(`prompt_model=${job.result.model}`);
       if (job.result && job.result.kind === "llm_unload") appendLog(`unloaded_prompt_model=${job.result.model}`);
       if (job.result && job.result.kind === "model_download") appendLog(`downloaded=${job.result.paths.join(", ")}`);
@@ -1602,6 +1663,7 @@ async function pollJob() {
 }
 
 function bind() {
+  $("startComfy").onclick = () => startComfy().catch((error) => alert(error.message));
   $("validateComfy").onclick = () => validateComfy().catch((error) => alert(error.message));
   $("downloadModels").onclick = () => {
     if (confirm("Download missing default ComfyUI model files? These files can be large.")) {
@@ -1612,6 +1674,7 @@ function bind() {
       });
     }
   };
+  $("startLlm").onclick = () => startLlm().catch((error) => alert(error.message));
   $("validateLlm").onclick = () => validateLlm().catch((error) => alert(error.message));
   $("downloadLlm").onclick = () => downloadPromptModel().catch((error) => alert(error.message));
   $("unloadLlm").onclick = () => unloadPromptModel().catch((error) => alert(error.message));

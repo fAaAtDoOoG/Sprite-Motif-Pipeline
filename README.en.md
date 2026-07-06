@@ -63,6 +63,7 @@ uv run spritepipe-tk
 The browser UI supports:
 
 - ComfyUI validation and missing `.safetensors` download.
+- Local server launch buttons for ComfyUI and Ollama.
 - Prompt model validation and Ollama model pull.
 - Prompt preview with progress feedback.
 - Batch generation with progress, logs, and a default high-res/low-res comparison viewer.
@@ -137,6 +138,8 @@ $env:SPRITEPIPE_LLM_MODEL="qwen2.5:7b-instruct"
 The browser GUI defaults to Ollama `qwen2.5:7b-instruct`. When `Provider = ollama`, the web UI validates the prompt model before previewing, generating, or iterating, so it will not silently use the deterministic fallback while you expect the LLM. If the model is missing, use `Validate Prompt Model` or `Download Prompt Model` in the web UI. To explicitly use the built-in deterministic composer, set `Provider` to `none`.
 
 After generation, selecting a candidate shows high-res on the left and the low-res sprite on the right, upscaled pixel-perfect to the same displayed size as the high-res image. The viewer supports mouse-wheel zoom, left-button drag panning, movement buttons, and zoom in/out controls.
+
+Use `Start ComfyUI` in the Backend section to launch a local ComfyUI from `ComfyUI Folder`; common `run_nvidia_gpu.bat`, portable `python_embeded`, and `main.py` setups are supported. Use `Start Ollama` to explicitly start the local Ollama server.
 
 Ollama can keep recently used models in memory. This project sends `keep_alive=0` for prompt rewriting by default, so the local prompt model unloads after each preview/generation request. The browser GUI also has an `Unload Prompt Model` button. If you prefer faster repeated prompt rewrites and have enough RAM/VRAM, set a longer value before launching the GUI:
 

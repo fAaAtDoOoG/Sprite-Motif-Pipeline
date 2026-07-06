@@ -1,22 +1,37 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
-from urllib.parse import urlencode
+from typing import Any, Callable
+from urllib.parse import urlencode, urlparse
 
 import requests
 
 from .config import DEFAULTS, ModelDefaults
+
+ProgressCallback = Callable[[str], None]
+DEFAULT_COMFY_URL = "http://127.0.0.1:8188"
 
 
 class ComfyError(RuntimeError):
     pass
 
 
+@dataclass(frozen=True)
+class ComfyLaunchPlan:
+    command: tuple[str, ...]
+    cwd: Path
+    root: Path
+    label: str
+
+
 class ComfyClient:
-    def __init__(self, base_url: str = "http://127.0.0.1:8188", timeout_s: int = 30):
+    def __init__(self, base_url: str = DEFAULT_COMFY_URL, timeout_s: int = 30):
         self.base_url = base_url.rstrip("/")
         self.timeout_s = timeout_s
         self.client_id = str(uuid.uuid4())
@@ -101,9 +116,192 @@ def validate_model_assets(client: ComfyClient, defaults: ModelDefaults = DEFAULT
     return missing
 
 
+def default_comfy_dir(models_root: Path | None = None) -> Path:
+    env = os.environ.get("SPRITEPIPE_COMFY_DIR", "").strip()
+    if env:
+        return Path(env)
+
+    candidates: list[Path] = []
+    if models_root:
+        root = models_root.expanduser()
+        if root.name.lower() == "models":
+            candidates.append(root.parent)
+    candidates.extend(
+        [
+            Path("D:/AI/ComfyUI"),
+            Path("C:/AI/ComfyUI"),
+            Path("D:/AI/ComfyUI_windows_portable"),
+            Path("C:/AI/ComfyUI_windows_portable"),
+            Path.home() / "ComfyUI",
+            Path.cwd() / "ComfyUI",
+        ]
+    )
+    for candidate in candidates:
+        if _looks_like_comfyui_root(candidate):
+            return candidate
+    return candidates[0] if candidates else Path("D:/AI/ComfyUI")
+
+
+def start_comfyui_server(
+    base_url: str = DEFAULT_COMFY_URL,
+    *,
+    comfy_dir: str | Path = "",
+    models_root: str | Path = "",
+    progress: ProgressCallback | None = None,
+    timeout_s: int = 180,
+) -> dict[str, str]:
+    base_url = (base_url or DEFAULT_COMFY_URL).rstrip("/")
+    if comfyui_is_ready(base_url):
+        return {"status": "ready", "message": "ComfyUI is already running.", "comfy_dir": str(comfy_dir or "")}
+
+    if not _is_local_endpoint(base_url):
+        raise RuntimeError(f"Cannot auto-start non-local ComfyUI endpoint: {base_url}")
+
+    root = resolve_comfyui_dir(comfy_dir, models_root)
+    plan = build_comfy_launch_plan(root, base_url)
+    log_path = Path.cwd() / "logs" / "comfyui.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    _emit(progress, f"starting ComfyUI with {plan.label}")
+    _emit(progress, f"log {log_path}")
+
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    log_handle = log_path.open("ab")
+    try:
+        subprocess.Popen(
+            plan.command,
+            cwd=plan.cwd,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            creationflags=creationflags,
+        )
+    finally:
+        log_handle.close()
+
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if comfyui_is_ready(base_url):
+            _emit(progress, "ComfyUI is running")
+            return {
+                "status": "started",
+                "message": "ComfyUI is running.",
+                "comfy_dir": str(plan.root),
+                "log_path": str(log_path),
+            }
+        time.sleep(2)
+        _emit(progress, "waiting for ComfyUI")
+
+    raise RuntimeError(f"ComfyUI was launched but is not reachable at {base_url}. Check {log_path}.")
+
+
+def comfyui_is_ready(base_url: str = DEFAULT_COMFY_URL) -> bool:
+    base_url = (base_url or DEFAULT_COMFY_URL).rstrip("/")
+    for path in ("/system_stats", "/object_info"):
+        try:
+            response = requests.get(f"{base_url}{path}", timeout=3)
+            if response.ok:
+                return True
+        except requests.RequestException:
+            continue
+    return False
+
+
+def resolve_comfyui_dir(comfy_dir: str | Path = "", models_root: str | Path = "") -> Path:
+    candidates: list[Path] = []
+    if comfy_dir:
+        candidates.append(Path(comfy_dir).expanduser())
+    if models_root:
+        models_path = Path(models_root).expanduser()
+        if models_path.name.lower() == "models":
+            candidates.append(models_path.parent)
+    candidates.append(default_comfy_dir(Path(models_root).expanduser() if models_root else None))
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        resolved = candidate.resolve() if candidate.exists() else candidate.absolute()
+        key = str(resolved).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        if _looks_like_comfyui_root(resolved):
+            return resolved
+    raise FileNotFoundError(f"Could not find a ComfyUI launchable folder. Tried: {', '.join(str(path) for path in candidates)}")
+
+
+def build_comfy_launch_plan(root: Path, base_url: str = DEFAULT_COMFY_URL) -> ComfyLaunchPlan:
+    root = root.expanduser().resolve()
+    host, port = _host_port(base_url)
+    batch_names = (
+        "run_nvidia_gpu.bat",
+        "run_nvidia_gpu_fast_fp16_accumulation.bat",
+        "run_cpu.bat",
+    )
+    for name in batch_names:
+        script = root / name
+        if script.exists():
+            return ComfyLaunchPlan(
+                command=("cmd.exe", "/c", str(script)),
+                cwd=root,
+                root=root,
+                label=name,
+            )
+
+    portable_main = root / "ComfyUI" / "main.py"
+    portable_python = root / "python_embeded" / "python.exe"
+    if portable_main.exists() and portable_python.exists():
+        return ComfyLaunchPlan(
+            command=(str(portable_python), "-s", str(portable_main), "--listen", host, "--port", str(port)),
+            cwd=root,
+            root=root,
+            label="portable python_embeded",
+        )
+
+    main_py = root / "main.py"
+    if main_py.exists():
+        python_exe = root / "venv" / "Scripts" / "python.exe"
+        interpreter = str(python_exe) if python_exe.exists() else sys.executable
+        return ComfyLaunchPlan(
+            command=(interpreter, str(main_py), "--listen", host, "--port", str(port)),
+            cwd=root,
+            root=root,
+            label="main.py",
+        )
+
+    raise FileNotFoundError(f"No supported ComfyUI launch script was found in {root}.")
+
+
 def _combo_values(info: dict[str, Any], node_type: str, input_name: str) -> list[str]:
     required = info.get(node_type, {}).get("input", {}).get("required", {})
     spec = required.get(input_name)
     if isinstance(spec, list) and spec and isinstance(spec[0], list):
         return [str(value) for value in spec[0]]
     return []
+
+
+def _looks_like_comfyui_root(path: Path) -> bool:
+    return any(
+        candidate.exists()
+        for candidate in (
+            path / "main.py",
+            path / "run_nvidia_gpu.bat",
+            path / "run_cpu.bat",
+            path / "ComfyUI" / "main.py",
+        )
+    )
+
+
+def _is_local_endpoint(endpoint: str) -> bool:
+    host = urlparse(endpoint).hostname
+    return host in {None, "localhost", "127.0.0.1", "::1"}
+
+
+def _host_port(endpoint: str) -> tuple[str, int]:
+    parsed = urlparse(endpoint or DEFAULT_COMFY_URL)
+    host = parsed.hostname or "127.0.0.1"
+    if host == "localhost":
+        host = "127.0.0.1"
+    return host, parsed.port or 8188
+
+
+def _emit(progress: ProgressCallback | None, message: str) -> None:
+    if progress is not None:
+        progress(message)

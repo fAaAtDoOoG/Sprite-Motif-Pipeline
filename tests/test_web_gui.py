@@ -32,3 +32,11 @@ def test_browser_ui_contains_comparison_viewer_controls():
     assert "zoomIn" in INDEX_HTML
     assert "showCandidateComparison" in APP_JS
     assert "setZoomAround" in APP_JS
+
+
+def test_browser_ui_contains_local_server_start_controls():
+    assert "startComfy" in INDEX_HTML
+    assert "comfyDir" in INDEX_HTML
+    assert "startLlm" in INDEX_HTML
+    assert "/api/start-comfy" in APP_JS
+    assert "/api/start-llm" in APP_JS
