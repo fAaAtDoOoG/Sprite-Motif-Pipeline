@@ -79,6 +79,8 @@ def test_llm_receives_raw_user_text_for_semantic_classification(monkeypatch):
     assert "fixed keyword list" in captured["system"]
     assert "Motif cohesion" in captured["system"]
     assert "Do not split modifiers away from the thing they describe" in captured["system"]
+    assert "negative_prompt must stay as comma-separated short tags" in captured["system"]
+    assert "These motif cohesion rules apply to positive_prompt only" in captured["system"]
     assert "teeth" in spec.negative_prompt
     assert "visible muscles" in spec.positive_prompt
     assert "shell armor" in spec.positive_prompt

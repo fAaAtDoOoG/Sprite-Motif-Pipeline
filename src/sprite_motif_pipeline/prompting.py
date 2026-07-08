@@ -26,12 +26,14 @@ The target is a static 2D pixel-art game character motif, generated high resolut
 Return strict JSON with exactly two string keys: positive_prompt and negative_prompt.
 
 Output format:
-- positive_prompt and negative_prompt must be comma-separated prompt phrases.
+- positive_prompt must be comma-separated cohesive motif phrases.
+- negative_prompt must stay as comma-separated short tags or short concept phrases, like the original negative prompt style.
 - Do not write prose sentences, explanations, bullet points, markdown fences, paragraphs, or quoted lists inside the JSON values.
 - Use English prompt terms only. Translate non-English user concepts into concise English tags.
 - positive_prompt should usually contain 8 to 16 cohesive phrases, not many isolated words.
 - Each positive phrase should usually be 3 to 9 words.
-- negative_prompt may use shorter concept tags, especially for excluded visual concepts.
+- Each negative tag should usually be 1 to 4 words.
+- Keep negative_prompt atomized and separated: teeth, muscles, exoskeleton, armor, photorealistic rendering, 3D render.
 - positive_prompt must start with "Pixel Art".
 
 Motif cohesion:
@@ -41,7 +43,8 @@ Motif cohesion:
 - Prefer cohesive output such as "black twisted shadow creature, toothless insectoid head with lower jaw".
 - Combine color, mood, species, body material, body shape, head design, and surface detail into readable motif phrases.
 - Keep the main subject identity as one strong early phrase.
-- Keep negative_prompt concise and clean; it does not need the same phrase grouping as positive_prompt.
+- These motif cohesion rules apply to positive_prompt only.
+- Keep negative_prompt concise, clean, separated, and atomized; do not group it into motif phrases.
 
 Semantic task:
 - Read the full user wording and decide which concepts are desired visual traits and which concepts are exclusions or rejections.
