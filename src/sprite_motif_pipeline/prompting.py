@@ -19,6 +19,9 @@ Return strict JSON with keys positive_prompt and negative_prompt.
 
 Hard requirements:
 - The positive prompt must start with "Pixel Art".
+- Classify the user's input into desired visual traits and exclusions. Do not simply translate negated phrases into the positive prompt.
+- Treat negative_constraints in the user payload as mandatory exclusions. Keep those concepts out of positive_prompt and include them in negative_prompt.
+- Chinese or English phrases like "无牙齿", "不要牙齿", "without teeth", "avoid teeth", or unwanted exposed anatomy such as "可见肌肉" should become negative_prompt concepts like "teeth" or "visible muscles".
 - Describe exactly one full-body character, static, centered, facing right in side view or three-quarter side view.
 - Make the silhouette readable at 64x64: clean outline, limited palette, strong contrast, large simple shapes.
 - Prefer a neutral plain background and no readable text.
@@ -36,6 +39,12 @@ class PromptSpec:
     negative_prompt: str
     source: str
     notes: str = ""
+
+
+@dataclass(frozen=True)
+class PromptIntent:
+    positive_text: str
+    negative_terms: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -85,17 +94,32 @@ def compose_prompt(
         )
 
     clean_description = _clean_one_line(description or "")
+    description_intent = split_prompt_intent(clean_description)
+    clean_description = description_intent.positive_text
     if not clean_description:
         clean_description = "an original adventurer character"
+
+    feedback_intent = split_prompt_intent(feedback or "")
+    clean_feedback = feedback_intent.positive_text or None
+    negative_constraints = _dedupe_terms([*description_intent.negative_terms, *feedback_intent.negative_terms])
 
     config = llm_config or LLMConfig.from_env()
     if config.provider and config.provider != "none":
         try:
-            return _compose_with_llm(clean_description, feedback, previous_prompt, previous_negative_prompt, config)
+            return _compose_with_llm(
+                clean_description,
+                clean_feedback,
+                previous_prompt,
+                previous_negative_prompt,
+                config,
+                negative_constraints,
+                raw_description=_clean_one_line(description or ""),
+                raw_feedback=_clean_one_line(feedback or ""),
+            )
         except Exception as exc:  # noqa: BLE001 - fallback is an intentional UX feature.
             if not allow_fallback:
                 raise
-            fallback = _compose_fallback(clean_description, feedback, previous_prompt)
+            fallback = _compose_fallback(clean_description, clean_feedback, previous_prompt, negative_constraints)
             return PromptSpec(
                 positive_prompt=fallback.positive_prompt,
                 negative_prompt=fallback.negative_prompt,
@@ -103,7 +127,43 @@ def compose_prompt(
                 notes=f"LLM prompt rewrite failed, used deterministic fallback: {exc}",
             )
 
-    return _compose_fallback(clean_description, feedback, previous_prompt)
+    return _compose_fallback(clean_description, clean_feedback, previous_prompt, negative_constraints)
+
+
+def split_prompt_intent(text: str | None) -> PromptIntent:
+    clean = _clean_one_line(text or "")
+    if not clean:
+        return PromptIntent("")
+
+    positive_parts: list[str] = []
+    negative_terms: list[str] = []
+    negative_context = False
+
+    for raw_part in re.split(r"[,，;；、。.!?？\n\r]+", clean):
+        part = _clean_clause(raw_part)
+        if not part:
+            continue
+
+        positive_prefix, extracted_terms = _extract_negative_clause(part)
+        if extracted_terms:
+            if positive_prefix:
+                positive_parts.append(positive_prefix)
+            negative_terms.extend(extracted_terms)
+            negative_context = True
+            continue
+
+        if _looks_like_negative_fragment(part, carry_context=negative_context):
+            negative_terms.extend(_split_negative_targets(part))
+            negative_context = True
+            continue
+
+        positive_parts.append(part)
+        negative_context = False
+
+    return PromptIntent(
+        positive_text=_clean_one_line(", ".join(positive_parts)),
+        negative_terms=tuple(_dedupe_terms(negative_terms)),
+    )
 
 
 def ensure_pixel_trigger(prompt: str) -> str:
@@ -117,6 +177,7 @@ def _compose_fallback(
     description: str,
     feedback: str | None,
     previous_prompt: str | None,
+    negative_constraints: Iterable[str] = (),
 ) -> PromptSpec:
     revision = _clean_one_line(feedback or "")
     previous = _clean_one_line(previous_prompt or "")
@@ -137,7 +198,7 @@ def _compose_fallback(
     )
     return PromptSpec(
         positive_prompt=positive,
-        negative_prompt=DEFAULT_NEGATIVE_PROMPT,
+        negative_prompt=_merge_negative_prompt(DEFAULT_NEGATIVE_PROMPT, negative_constraints),
         source="fallback",
         notes="Deterministic prompt composer used; set SPRITEPIPE_LLM_PROVIDER for LLM rewriting.",
     )
@@ -149,12 +210,20 @@ def _compose_with_llm(
     previous_prompt: str | None,
     previous_negative_prompt: str | None,
     config: LLMConfig,
+    negative_constraints: Iterable[str] = (),
+    *,
+    raw_description: str = "",
+    raw_feedback: str = "",
 ) -> PromptSpec:
+    required_negative_terms = _dedupe_terms(negative_constraints)
     user_payload = {
         "description": description,
+        "raw_user_description": raw_description or description,
         "previous_prompt": previous_prompt or "",
         "previous_negative_prompt": previous_negative_prompt or "",
         "feedback": feedback or "",
+        "raw_feedback": raw_feedback,
+        "negative_constraints": required_negative_terms,
         "examples": _select_examples(description, feedback),
     }
     messages = [
@@ -178,7 +247,7 @@ def _compose_with_llm(
         negative = DEFAULT_NEGATIVE_PROMPT
 
     positive = _enforce_core_constraints(positive)
-    negative = _enforce_negative_constraints(negative)
+    negative = _enforce_negative_constraints(_merge_negative_prompt(negative, required_negative_terms))
     return PromptSpec(
         positive_prompt=positive,
         negative_prompt=negative,
@@ -286,6 +355,142 @@ def _enforce_negative_constraints(prompt: str) -> str:
     if additions:
         prompt = f"{prompt}, {', '.join(additions)}"
     return prompt
+
+
+def _extract_negative_clause(part: str) -> tuple[str, list[str]]:
+    chinese_markers = [
+        "不要出现",
+        "不能出现",
+        "不能有",
+        "不需要",
+        "不要",
+        "没有",
+        "避免",
+        "禁止",
+        "去掉",
+        "移除",
+        "排除",
+        "别出现",
+        "别有",
+        "别",
+        "无",
+    ]
+    candidates: list[tuple[int, str]] = []
+    for marker in chinese_markers:
+        index = part.find(marker)
+        if index < 0:
+            continue
+        if marker == "无" and index != 0:
+            continue
+        candidates.append((index, marker))
+
+    english_match = re.search(
+        r"\b(no visible|no|without|avoid|exclude|remove|not)\b\s+(?P<target>.+)$",
+        part,
+        flags=re.IGNORECASE,
+    )
+    if english_match:
+        candidates.append((english_match.start(), english_match.group(1)))
+
+    if not candidates:
+        return "", []
+
+    index, marker = min(candidates, key=lambda item: item[0])
+    target_start = index + len(marker)
+    positive_prefix = _clean_clause(part[:index])
+    target = _clean_clause(part[target_start:])
+    return positive_prefix, _split_negative_targets(target)
+
+
+def _split_negative_targets(text: str) -> list[str]:
+    clean = _clean_clause(text)
+    if not clean:
+        return []
+    clean = re.sub(r"^(任何|任意|所有|明显的?)\s*", "", clean, flags=re.IGNORECASE)
+    clean = re.sub(r"\s*(等|等等|之类|这类|这些|这种|etc\.?)$", "", clean, flags=re.IGNORECASE)
+    pieces = re.split(r"\s*(?:、|/|或|或者|和|与|及|以及|\band\b|\bor\b)\s*", clean, flags=re.IGNORECASE)
+    return _dedupe_terms(_normalize_negative_term(piece) for piece in pieces if _clean_clause(piece))
+
+
+def _looks_like_negative_fragment(part: str, *, carry_context: bool) -> bool:
+    lowered = part.lower()
+    anatomy_keywords = [
+        "可见肌肉",
+        "暴露肌肉",
+        "裸露肌肉",
+        "外露肌肉",
+        "肌肉组织",
+        "血肉",
+        "内脏",
+        "肠子",
+        "gore",
+        "visible muscle",
+        "exposed muscle",
+        "muscle tissue",
+        "organs",
+        "intestines",
+    ]
+    if any(keyword in lowered for keyword in anatomy_keywords):
+        return True
+    carry_keywords = ["牙齿", "牙", "teeth", "tooth", "fangs"]
+    return carry_context and any(keyword in lowered for keyword in carry_keywords)
+
+
+def _normalize_negative_term(term: str) -> str:
+    clean = _clean_clause(term)
+    clean = re.sub(r"^(不要|不需要|不能出现|不能有|没有|避免|禁止|去掉|移除|排除|别出现|别有|别|无)\s*", "", clean)
+    clean = re.sub(r"^(no visible|no|without|avoid|exclude|remove|not)\s+", "", clean, flags=re.IGNORECASE)
+    clean = re.sub(r"\s*(等|等等|之类|这类|这些|这种|etc\.?)$", "", clean, flags=re.IGNORECASE)
+    translations = {
+        "牙": "teeth",
+        "牙齿": "teeth",
+        "尖牙": "fangs",
+        "獠牙": "fangs",
+        "可见肌肉": "visible muscles",
+        "明显肌肉": "visible muscles",
+        "暴露肌肉": "exposed muscles",
+        "裸露肌肉": "exposed muscles",
+        "外露肌肉": "exposed muscles",
+        "肌肉组织": "muscle tissue",
+        "血肉": "gore",
+        "血液": "blood",
+        "血": "blood",
+        "内脏": "organs",
+        "肠子": "intestines",
+        "骨头": "bones",
+        "骷髅": "skull",
+    }
+    return translations.get(clean, clean)
+
+
+def _merge_negative_prompt(prompt: str, terms: Iterable[str]) -> str:
+    additions = _dedupe_terms(terms)
+    if not additions:
+        return prompt
+    lower_prompt = prompt.lower()
+    missing = [term for term in additions if term.lower() not in lower_prompt]
+    if missing:
+        return f"{prompt}, {', '.join(missing)}"
+    return prompt
+
+
+def _dedupe_terms(terms: Iterable[str]) -> list[str]:
+    unique: list[str] = []
+    seen: set[str] = set()
+    for term in terms:
+        clean = _clean_clause(str(term))
+        if not clean:
+            continue
+        key = clean.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(clean)
+    return unique
+
+
+def _clean_clause(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip(" \t\r\n,，;；、。.!?？:：()（）[]【】\"'")
 
 
 def _select_examples(description: str, feedback: str | None) -> list[dict[str, str]]:

@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 import sprite_motif_pipeline.prompting as prompting
@@ -25,6 +27,45 @@ def test_llm_failure_can_be_strict_instead_of_fallback():
             llm_config=LLMConfig(provider="unsupported-local-model"),
             allow_fallback=False,
         )
+
+
+def test_fallback_splits_user_negative_constraints():
+    spec = compose_prompt(
+        "\u9ed1\u5f71\u602a\u7269\uff0c\u8eab\u4f53\u7626\u5f31\uff0c\u65e0\u7259\u9f7f\uff0c\u53ef\u89c1\u808c\u8089\u7b49"
+    )
+
+    assert "\u8eab\u4f53\u7626\u5f31" in spec.positive_prompt
+    assert "\u65e0\u7259\u9f7f" not in spec.positive_prompt
+    assert "\u53ef\u89c1\u808c\u8089" not in spec.positive_prompt
+    assert "teeth" in spec.negative_prompt
+    assert "visible muscles" in spec.negative_prompt
+
+
+def test_llm_receives_and_enforces_user_negative_constraints(monkeypatch):
+    captured = {}
+
+    def fake_call_ollama(messages, config):
+        captured["payload"] = json.loads(messages[1]["content"])
+        return (
+            '{"positive_prompt":"Pixel Art, one original full-body shadow creature, static pose, centered, facing right, '
+            'plain neutral background, no readable text, designed to downscale cleanly to 64x64",'
+            '"negative_prompt":"sunny cheerful mood"}'
+        )
+
+    monkeypatch.setattr(prompting, "_call_ollama", fake_call_ollama)
+
+    spec = compose_prompt(
+        "\u9ed1\u5f71\u602a\u7269\uff0c\u65e0\u7259\u9f7f\uff0c\u53ef\u89c1\u808c\u8089\u7b49",
+        llm_config=LLMConfig(provider="ollama", model="fake"),
+        allow_fallback=False,
+    )
+
+    assert captured["payload"]["description"] == "\u9ed1\u5f71\u602a\u7269"
+    assert captured["payload"]["negative_constraints"] == ["teeth", "visible muscles"]
+    assert "\u65e0\u7259\u9f7f" in captured["payload"]["raw_user_description"]
+    assert "teeth" in spec.negative_prompt
+    assert "visible muscles" in spec.negative_prompt
+    assert "\u65e0\u7259\u9f7f" not in spec.positive_prompt
 
 
 def test_llm_negative_prompt_is_preserved_and_enforced(monkeypatch):
