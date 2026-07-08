@@ -157,6 +157,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=7865)
     parser.add_argument("--no-browser", action="store_true")
+    parser.add_argument("--no-auto-comfy", action="store_true", help="Do not try to auto-start local ComfyUI when the web app starts.")
     parser.add_argument("--auto-shutdown-after", type=int, default=20, help="Seconds without browser heartbeat before auto-stopping the local web server.")
     args = parser.parse_args(argv)
 
@@ -164,6 +165,8 @@ def main(argv: list[str] | None = None) -> int:
     server = ThreadingHTTPServer((args.host, args.port), make_handler(state))
     state.attach_server(server)
     state.start_auto_shutdown_monitor()
+    if not args.no_auto_comfy:
+        schedule_auto_start_comfy(state)
     url = f"http://{args.host}:{args.port}/"
     print(f"Sprite Motif web GUI: {url}")
     if not args.no_browser:
@@ -345,6 +348,30 @@ def start_comfy_job(payload: dict[str, Any], progress: Callable[[str, int | None
         progress=lambda message: progress(message, percent_from_message(message)),
     )
     return {"kind": "comfy_start", **result}
+
+
+def schedule_auto_start_comfy(state: WebAppState) -> dict[str, Any] | None:
+    try:
+        return state.start("Starting ComfyUI", auto_start_comfy_job)
+    except RuntimeError:
+        return None
+
+
+def auto_start_comfy_job(progress: Callable[[str, int | None], None]) -> dict[str, Any]:
+    payload = default_payload()
+    progress(f"checking ComfyUI at {payload['comfy_url']}", 5)
+    try:
+        result = start_comfy_job(payload, progress)
+    except FileNotFoundError as exc:
+        message = f"ComfyUI folder was not found. Set ComfyUI Folder or SPRITEPIPE_COMFY_DIR, then use Start ComfyUI. {exc}"
+        progress(message, 100)
+        return {"kind": "comfy_start", "auto": True, "status": "not_found", "message": message}
+
+    if result.get("status") == "ready":
+        progress("ComfyUI is already running", 100)
+    elif result.get("status") == "started":
+        progress("ComfyUI auto-started", 100)
+    return {"auto": True, **result}
 
 
 def download_models_job(payload: dict[str, Any], progress: Callable[[str, int | None], None]) -> dict[str, Any]:
@@ -583,7 +610,7 @@ INDEX_HTML = """<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Sprite Motif Pipeline</title>
-  <link rel="stylesheet" href="/style.css?v=7">
+  <link rel="stylesheet" href="/style.css?v=8">
 </head>
 <body>
   <header class="topbar">
@@ -732,7 +759,7 @@ INDEX_HTML = """<!doctype html>
       </div>
     </section>
   </main>
-  <script src="/app.js?v=7"></script>
+  <script src="/app.js?v=8"></script>
 </body>
 </html>
 """
@@ -1676,6 +1703,7 @@ async function pollJob() {
   try {
     const job = await api("/api/job");
     setStatus(job.label, job.percent);
+    setBusy(Boolean(job.active));
     if (job.logs && job.logs.length) log(job.logs);
     if (job.prompt) $("promptPreview").value = job.prompt;
     if (!job.active && job.id !== handledJob) {
@@ -1730,6 +1758,7 @@ async function start() {
   bind();
   bindViewer();
   startHeartbeat();
+  await pollJob();
   pollTimer = setInterval(pollJob, 800);
 }
 

@@ -13,7 +13,7 @@ from typing import Any
 
 from PIL import Image, ImageTk
 
-from .comfy import ComfyClient, validate_model_assets, validate_required_nodes
+from .comfy import ComfyClient, start_comfyui_server, validate_model_assets, validate_required_nodes
 from .config import DEFAULT_HIGH_RES, DEFAULT_LOW_RES, DEFAULTS, format_size, parse_size
 from .model_assets import assets_for_filenames, default_models_root, download_assets, missing_local_assets
 from .ollama import DEFAULT_OLLAMA_ENDPOINT, OllamaValidation, pull_ollama_model, validate_ollama_model
@@ -102,6 +102,7 @@ class SpritePipeApp:
         self._init_vars()
         self._build_ui()
         self._poll_events()
+        self.root.after(300, self.auto_start_comfy)
 
     def _init_vars(self) -> None:
         self.comfy_url_var = tk.StringVar(value="http://127.0.0.1:8188")
@@ -312,6 +313,28 @@ class SpritePipeApp:
             return {"status": "ready"}
 
         self._run_worker("Validating", work, self._handle_validation_result)
+
+    def auto_start_comfy(self) -> None:
+        url = self.comfy_url_var.get().strip()
+        models_root = Path(self.models_root_var.get().strip() or default_models_root())
+
+        def work() -> dict[str, str]:
+            try:
+                return start_comfyui_server(
+                    url,
+                    models_root=models_root,
+                    progress=lambda message: self.events.put(("log", message)),
+                )
+            except FileNotFoundError as exc:
+                return {
+                    "status": "not_found",
+                    "message": f"ComfyUI folder was not found. Set Models or SPRITEPIPE_COMFY_DIR, then validate/start manually. {exc}",
+                }
+
+        def done(result: dict[str, str]) -> None:
+            self._log(result.get("message") or result.get("status") or "ComfyUI startup check complete.")
+
+        self._run_worker("Starting ComfyUI", work, done)
 
     def _handle_validation_result(self, result: dict[str, Any]) -> None:
         status = result["status"]

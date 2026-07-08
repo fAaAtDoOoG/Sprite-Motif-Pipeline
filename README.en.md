@@ -139,7 +139,7 @@ The browser GUI defaults to Ollama `qwen2.5:7b-instruct`. When `Provider = ollam
 
 After generation, selecting a candidate shows high-res on the left and the low-res sprite on the right, upscaled pixel-perfect to the same displayed size as the high-res image. The viewer supports mouse-wheel zoom, left-button drag panning, movement buttons, and zoom in/out controls.
 
-Use `Start ComfyUI` in the Backend section to launch a local ComfyUI from `ComfyUI Folder`; common `run_nvidia_gpu.bat`, portable `python_embeded`, and `main.py` setups are supported. Use `Start Ollama` to explicitly start the local Ollama server.
+On startup, the browser GUI first checks `http://127.0.0.1:8188`. If a ComfyUI backend is already running, it reuses it; otherwise it tries to launch local ComfyUI from the default `ComfyUI Folder`. Use `Start ComfyUI` in the Backend section to retry manually; common `run_nvidia_gpu.bat`, portable `python_embeded`, and `main.py` setups are supported. Use `Start Ollama` to explicitly start the local Ollama server. To disable the startup ComfyUI check, launch with `uv run spritepipe-web --no-auto-comfy`.
 
 Ollama can keep recently used models in memory. This project sends `keep_alive=0` for prompt rewriting by default, so the local prompt model unloads after each preview/generation request. The browser GUI also has an `Unload Prompt Model` button. If you prefer faster repeated prompt rewrites and have enough RAM/VRAM, set a longer value before launching the GUI:
 
