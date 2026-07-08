@@ -3,6 +3,13 @@ import json
 import pytest
 
 import sprite_motif_pipeline.prompting as prompting
+from sprite_motif_pipeline.config import (
+    DEFAULT_PROMPT_MODEL,
+    DEFAULT_PROMPT_MODEL_NUM_CTX,
+    DEFAULT_PROMPT_MODEL_NUM_GPU,
+    DEFAULT_PROMPT_MODEL_NUM_PREDICT,
+    DEFAULT_PROMPT_MODEL_TIMEOUT,
+)
 from sprite_motif_pipeline.prompting import LLMConfig, _coerce_keep_alive, compose_prompt
 
 
@@ -29,45 +36,33 @@ def test_llm_failure_can_be_strict_instead_of_fallback():
         )
 
 
-def test_fallback_only_splits_explicit_negative_constraints():
+def test_fallback_does_not_hardcode_negative_splitting():
     spec = compose_prompt(
         "\u9ed1\u5f71\u602a\u7269\uff0c\u8eab\u4f53\u7626\u5f31\uff0c\u65e0\u7259\u9f7f\uff0c\u53ef\u89c1\u808c\u8089\uff0c\u5916\u58f3\uff0c\u76d4\u7532"
     )
 
     assert "\u8eab\u4f53\u7626\u5f31" in spec.positive_prompt
+    assert "\u65e0\u7259\u9f7f" in spec.positive_prompt
     assert "\u53ef\u89c1\u808c\u8089" in spec.positive_prompt
     assert "\u5916\u58f3" in spec.positive_prompt
     assert "\u76d4\u7532" in spec.positive_prompt
-    assert "\u65e0\u7259\u9f7f" not in spec.positive_prompt
-    assert "teeth" in spec.negative_prompt
+    assert "teeth" not in spec.negative_prompt
     assert "visible muscles" not in spec.negative_prompt
     assert "\u808c\u8089" not in spec.negative_prompt
     assert "\u5916\u58f3" not in spec.negative_prompt
     assert "\u76d4\u7532" not in spec.negative_prompt
 
 
-def test_fallback_splits_grouped_negative_constraints():
-    spec = compose_prompt(
-        "\u9ed1\u5f71\u602a\u7269\uff0c\u4e0d\u8981\u7259\u9f7f\u548c\u53ef\u89c1\u808c\u8089\uff0c\u5916\u58f3\uff0c\u76d4\u7532"
-    )
-
-    assert "\u5916\u58f3" in spec.positive_prompt
-    assert "\u76d4\u7532" in spec.positive_prompt
-    assert "\u4e0d\u8981\u7259\u9f7f" not in spec.positive_prompt
-    assert "\u53ef\u89c1\u808c\u8089" not in spec.positive_prompt
-    assert "teeth" in spec.negative_prompt
-    assert "visible muscles" in spec.negative_prompt
-
-
-def test_llm_receives_and_enforces_user_negative_constraints(monkeypatch):
+def test_llm_receives_raw_user_text_for_semantic_classification(monkeypatch):
     captured = {}
 
     def fake_call_ollama(messages, config):
+        captured["system"] = messages[0]["content"]
         captured["payload"] = json.loads(messages[1]["content"])
         return (
             '{"positive_prompt":"Pixel Art, one original full-body shadow creature, static pose, centered, facing right, '
-            'plain neutral background, no readable text, designed to downscale cleanly to 64x64",'
-            '"negative_prompt":"sunny cheerful mood"}'
+            'visible muscles, shell armor, plain neutral background, no readable text, designed to downscale cleanly to 64x64",'
+            '"negative_prompt":"teeth"}'
         )
 
     monkeypatch.setattr(prompting, "_call_ollama", fake_call_ollama)
@@ -78,15 +73,16 @@ def test_llm_receives_and_enforces_user_negative_constraints(monkeypatch):
         allow_fallback=False,
     )
 
-    assert captured["payload"]["description"] == "\u9ed1\u5f71\u602a\u7269, \u53ef\u89c1\u808c\u8089, \u5916\u58f3, \u76d4\u7532"
-    assert captured["payload"]["negative_constraints"] == ["teeth"]
+    assert captured["payload"]["description"] == "\u9ed1\u5f71\u602a\u7269\uff0c\u65e0\u7259\u9f7f\uff0c\u53ef\u89c1\u808c\u8089\uff0c\u5916\u58f3\uff0c\u76d4\u7532"
+    assert "negative_constraints" not in captured["payload"]
     assert "raw_user_description" not in captured["payload"]
+    assert "fixed keyword list" in captured["system"]
     assert "teeth" in spec.negative_prompt
-    assert "visible muscles" not in spec.negative_prompt
-    assert "\u65e0\u7259\u9f7f" not in spec.positive_prompt
+    assert "visible muscles" in spec.positive_prompt
+    assert "shell armor" in spec.positive_prompt
 
 
-def test_llm_negative_prompt_drops_positive_design_terms(monkeypatch):
+def test_llm_semantic_judgment_is_not_keyword_sanitized(monkeypatch):
     def fake_call_ollama(messages, config):
         return (
             '{"positive_prompt":"Pixel Art, one original full-body shadow creature, static pose, centered, facing right, '
@@ -102,11 +98,10 @@ def test_llm_negative_prompt_drops_positive_design_terms(monkeypatch):
         allow_fallback=False,
     )
 
-    assert "\u808c\u8089" not in spec.negative_prompt
-    assert "\u5916\u58f3" not in spec.negative_prompt
-    assert "\u76d4\u7532" not in spec.negative_prompt
+    assert "\u808c\u8089" in spec.negative_prompt
+    assert "\u5916\u58f3" in spec.negative_prompt
+    assert "\u76d4\u7532" in spec.negative_prompt
     assert "sunny cheerful mood" in spec.negative_prompt
-    assert "teeth" in spec.negative_prompt
 
 
 def test_llm_negative_prompt_is_preserved_and_enforced(monkeypatch):
@@ -165,3 +160,20 @@ def test_ollama_keep_alive_defaults_to_unload(monkeypatch):
     assert LLMConfig.from_env().keep_alive == "0"
     assert _coerce_keep_alive("0") == 0
     assert _coerce_keep_alive("5m") == "5m"
+
+
+def test_ollama_prompt_model_defaults_for_gpu(monkeypatch):
+    monkeypatch.setenv("SPRITEPIPE_LLM_PROVIDER", "ollama")
+    monkeypatch.delenv("SPRITEPIPE_LLM_MODEL", raising=False)
+    monkeypatch.delenv("SPRITEPIPE_LLM_TIMEOUT", raising=False)
+    monkeypatch.delenv("SPRITEPIPE_OLLAMA_NUM_GPU", raising=False)
+    monkeypatch.delenv("SPRITEPIPE_OLLAMA_NUM_CTX", raising=False)
+    monkeypatch.delenv("SPRITEPIPE_OLLAMA_NUM_PREDICT", raising=False)
+
+    config = LLMConfig.from_env()
+
+    assert config.model == DEFAULT_PROMPT_MODEL
+    assert config.timeout_s == DEFAULT_PROMPT_MODEL_TIMEOUT
+    assert config.ollama_num_gpu == DEFAULT_PROMPT_MODEL_NUM_GPU
+    assert config.ollama_num_ctx == DEFAULT_PROMPT_MODEL_NUM_CTX
+    assert config.ollama_num_predict == DEFAULT_PROMPT_MODEL_NUM_PREDICT

@@ -132,12 +132,15 @@ Ollama:
 ```powershell
 $env:SPRITEPIPE_LLM_PROVIDER="ollama"
 $env:SPRITEPIPE_LLM_ENDPOINT="http://127.0.0.1:11434"
-$env:SPRITEPIPE_LLM_MODEL="qwen2.5:7b-instruct"
+$env:SPRITEPIPE_LLM_MODEL="qwen3:32b"
+$env:SPRITEPIPE_OLLAMA_NUM_GPU="999"
+$env:SPRITEPIPE_OLLAMA_NUM_CTX="4096"
+$env:SPRITEPIPE_OLLAMA_NUM_PREDICT="256"
 ```
 
-The browser GUI defaults to Ollama `qwen2.5:7b-instruct`. When `Provider = ollama`, the web UI validates the prompt model before previewing, generating, or iterating, so it will not silently use the deterministic fallback while you expect the LLM. If the model is missing, use `Validate Prompt Model` or `Download Prompt Model` in the web UI. To explicitly use the built-in deterministic composer, set `Provider` to `none`.
+The browser GUI defaults to Ollama `qwen3:32b` with `num_gpu=999`, `num_ctx=4096`, and `num_predict=256`, so the 32B prompt rewrite path tries to use GPU offload by default. When `Provider = ollama`, the web UI validates the prompt model before previewing, generating, or iterating, so it will not silently use the deterministic fallback while you expect the LLM. If the model is missing, use `Validate Prompt Model` or `Download Prompt Model` in the web UI. To explicitly use the built-in deterministic composer, set `Provider` to `none`.
 
-The prompt composer first separates desired traits from explicit exclusions. For example, phrases such as `no teeth`, `without teeth`, or `无牙齿` are sent to the negative prompt instead of being translated into the positive prompt. Ordinary design traits such as muscles, shells, or armor stay positive unless the user explicitly asks to avoid or remove them.
+When a prompt model is enabled, the raw user description is sent to the LLM and the LLM decides which concepts are positive requirements and which belong in the negative prompt. The Python code does not split prompts with a fixed keyword list.
 
 After generation, selecting a candidate shows high-res on the left and the low-res sprite on the right, upscaled pixel-perfect to the same displayed size as the high-res image. The viewer supports mouse-wheel zoom, left-button drag panning, movement buttons, and zoom in/out controls.
 
@@ -150,6 +153,8 @@ $env:SPRITEPIPE_LLM_KEEP_ALIVE="5m"
 ```
 
 This only controls the prompt LLM. ComfyUI may still keep Qwen-Image model weights loaded for image generation.
+
+The prompt LLM timeout defaults to `SPRITEPIPE_LLM_TIMEOUT="900"` to tolerate `qwen3:32b` cold starts. The web GUI Prompt Model section also exposes GPU layers, context, max tokens, and thinking mode.
 
 The built-in prompt curriculum is stored at `src/sprite_motif_pipeline/prompt_training_examples.jsonl`. It is used as few-shot runtime context and can also serve as starter data for future prompt-model fine-tuning.
 

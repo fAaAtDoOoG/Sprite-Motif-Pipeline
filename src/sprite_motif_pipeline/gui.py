@@ -14,7 +14,18 @@ from typing import Any
 from PIL import Image, ImageTk
 
 from .comfy import ComfyClient, start_comfyui_server, validate_model_assets, validate_required_nodes
-from .config import DEFAULT_HIGH_RES, DEFAULT_LOW_RES, DEFAULTS, format_size, parse_size
+from .config import (
+    DEFAULT_HIGH_RES,
+    DEFAULT_LOW_RES,
+    DEFAULTS,
+    DEFAULT_PROMPT_MODEL,
+    DEFAULT_PROMPT_MODEL_NUM_CTX,
+    DEFAULT_PROMPT_MODEL_NUM_GPU,
+    DEFAULT_PROMPT_MODEL_NUM_PREDICT,
+    DEFAULT_PROMPT_MODEL_THINK,
+    format_size,
+    parse_size,
+)
 from .model_assets import assets_for_filenames, default_models_root, download_assets, missing_local_assets
 from .ollama import DEFAULT_OLLAMA_ENDPOINT, OllamaValidation, pull_ollama_model, validate_ollama_model
 from .progress import generation_percent, percent_from_message, short_status
@@ -120,8 +131,12 @@ class SpritePipeApp:
         self.timeout_var = tk.IntVar(value=900)
         self.dry_run_var = tk.BooleanVar(value=False)
         self.llm_provider_var = tk.StringVar(value="ollama")
-        self.llm_model_var = tk.StringVar(value="qwen2.5:7b-instruct")
+        self.llm_model_var = tk.StringVar(value=DEFAULT_PROMPT_MODEL)
         self.llm_endpoint_var = tk.StringVar(value=DEFAULT_OLLAMA_ENDPOINT)
+        self.llm_num_gpu_var = tk.IntVar(value=DEFAULT_PROMPT_MODEL_NUM_GPU)
+        self.llm_num_ctx_var = tk.IntVar(value=DEFAULT_PROMPT_MODEL_NUM_CTX)
+        self.llm_num_predict_var = tk.IntVar(value=DEFAULT_PROMPT_MODEL_NUM_PREDICT)
+        self.llm_think_var = tk.BooleanVar(value=DEFAULT_PROMPT_MODEL_THINK)
         self.status_var = tk.StringVar(value="Ready")
 
     def _build_ui(self) -> None:
@@ -203,8 +218,15 @@ class SpritePipeApp:
         ttk.Entry(llm, textvariable=self.llm_model_var).grid(row=1, column=1, sticky="ew", padx=6, pady=(6, 0))
         ttk.Label(llm, text="Endpoint").grid(row=2, column=0, sticky="w", pady=(6, 0))
         ttk.Entry(llm, textvariable=self.llm_endpoint_var).grid(row=2, column=1, sticky="ew", padx=6, pady=(6, 0))
+        ttk.Label(llm, text="GPU layers").grid(row=3, column=0, sticky="w", pady=(6, 0))
+        ttk.Entry(llm, textvariable=self.llm_num_gpu_var, width=10).grid(row=3, column=1, sticky="w", padx=6, pady=(6, 0))
+        ttk.Label(llm, text="Context").grid(row=4, column=0, sticky="w", pady=(6, 0))
+        ttk.Entry(llm, textvariable=self.llm_num_ctx_var, width=10).grid(row=4, column=1, sticky="w", padx=6, pady=(6, 0))
+        ttk.Label(llm, text="Max tokens").grid(row=5, column=0, sticky="w", pady=(6, 0))
+        ttk.Entry(llm, textvariable=self.llm_num_predict_var, width=10).grid(row=5, column=1, sticky="w", padx=6, pady=(6, 0))
+        ttk.Checkbutton(llm, text="Thinking", variable=self.llm_think_var).grid(row=6, column=1, sticky="w", padx=6, pady=(6, 0))
         llm_buttons = ttk.Frame(llm)
-        llm_buttons.grid(row=3, column=1, sticky="ew", padx=6, pady=(8, 0))
+        llm_buttons.grid(row=7, column=1, sticky="ew", padx=6, pady=(8, 0))
         llm_buttons.columnconfigure((0, 1), weight=1)
         self.llm_validate_button = ttk.Button(llm_buttons, text="Validate", command=self.validate_prompt_model)
         self.llm_validate_button.grid(row=0, column=0, sticky="ew", padx=(0, 4))
@@ -666,6 +688,10 @@ class SpritePipeApp:
             temperature=env_config.temperature,
             timeout_s=env_config.timeout_s,
             keep_alive=env_config.keep_alive,
+            ollama_num_gpu=int(self.llm_num_gpu_var.get()),
+            ollama_num_ctx=int(self.llm_num_ctx_var.get()),
+            ollama_num_predict=int(self.llm_num_predict_var.get()),
+            think=bool(self.llm_think_var.get()),
         )
 
     def _compose_from_ui(self):

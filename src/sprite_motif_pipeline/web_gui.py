@@ -17,7 +17,18 @@ from typing import Any, Callable
 from urllib.parse import parse_qs, urlencode, urlparse
 
 from .comfy import DEFAULT_COMFY_URL, ComfyClient, default_comfy_dir, start_comfyui_server, validate_model_assets, validate_required_nodes
-from .config import DEFAULT_HIGH_RES, DEFAULT_LOW_RES, DEFAULTS, format_size, parse_size
+from .config import (
+    DEFAULT_HIGH_RES,
+    DEFAULT_LOW_RES,
+    DEFAULTS,
+    DEFAULT_PROMPT_MODEL,
+    DEFAULT_PROMPT_MODEL_NUM_CTX,
+    DEFAULT_PROMPT_MODEL_NUM_GPU,
+    DEFAULT_PROMPT_MODEL_NUM_PREDICT,
+    DEFAULT_PROMPT_MODEL_THINK,
+    format_size,
+    parse_size,
+)
 from .model_assets import assets_for_filenames, default_models_root, download_assets, missing_local_assets
 from .ollama import DEFAULT_OLLAMA_ENDPOINT, pull_ollama_model, start_ollama_server, unload_ollama_model, validate_ollama_model
 from .progress import generation_percent, percent_from_message, short_status
@@ -314,8 +325,12 @@ def default_payload() -> dict[str, Any]:
         "timeout": 900,
         "dry_run": False,
         "llm_provider": "ollama",
-        "llm_model": "qwen2.5:7b-instruct",
+        "llm_model": DEFAULT_PROMPT_MODEL,
         "llm_endpoint": DEFAULT_OLLAMA_ENDPOINT,
+        "llm_num_gpu": DEFAULT_PROMPT_MODEL_NUM_GPU,
+        "llm_num_ctx": DEFAULT_PROMPT_MODEL_NUM_CTX,
+        "llm_num_predict": DEFAULT_PROMPT_MODEL_NUM_PREDICT,
+        "llm_think": DEFAULT_PROMPT_MODEL_THINK,
     }
 
 
@@ -544,15 +559,36 @@ def generation_options_from_payload(payload: dict[str, Any]) -> GenerationOption
 
 def llm_config_from_payload(payload: dict[str, Any]) -> LLMConfig:
     env_config = LLMConfig.from_env()
+    provider = str(payload.get("llm_provider") or env_config.provider or "ollama").lower()
+    default_num_gpu = env_config.ollama_num_gpu if env_config.ollama_num_gpu is not None else DEFAULT_PROMPT_MODEL_NUM_GPU if provider == "ollama" else None
+    default_num_ctx = env_config.ollama_num_ctx if env_config.ollama_num_ctx is not None else DEFAULT_PROMPT_MODEL_NUM_CTX if provider == "ollama" else None
+    default_num_predict = (
+        env_config.ollama_num_predict
+        if env_config.ollama_num_predict is not None
+        else DEFAULT_PROMPT_MODEL_NUM_PREDICT
+        if provider == "ollama"
+        else None
+    )
     return LLMConfig(
-        provider=str(payload.get("llm_provider") or env_config.provider or "ollama").lower(),
-        model=str(payload.get("llm_model") or env_config.model or "qwen2.5:7b-instruct"),
+        provider=provider,
+        model=str(payload.get("llm_model") or env_config.model or DEFAULT_PROMPT_MODEL),
         endpoint=str(payload.get("llm_endpoint") or env_config.endpoint or DEFAULT_OLLAMA_ENDPOINT),
         api_key=env_config.api_key,
         temperature=env_config.temperature,
         timeout_s=env_config.timeout_s,
         keep_alive=env_config.keep_alive,
+        ollama_num_gpu=optional_int(payload.get("llm_num_gpu"), default_num_gpu),
+        ollama_num_ctx=optional_int(payload.get("llm_num_ctx"), default_num_ctx),
+        ollama_num_predict=optional_int(payload.get("llm_num_predict"), default_num_predict),
+        think=bool(payload.get("llm_think")) if "llm_think" in payload else env_config.think,
     )
+
+
+def optional_int(value: object, default: int | None = None) -> int | None:
+    text = str(value or "").strip()
+    if not text:
+        return default
+    return int(text)
 
 
 def latest_run_response(output_dir: Path) -> dict[str, Any]:
@@ -669,6 +705,10 @@ INDEX_HTML = """<!doctype html>
         <label>Provider<select id="llmProvider"><option>ollama</option><option>none</option><option>openai-compatible</option><option>openai</option></select></label>
         <label>Model<input id="llmModel"></label>
         <label class="wide">Endpoint<input id="llmEndpoint"></label>
+        <label>GPU layers<input id="llmNumGpu" type="number" min="0"></label>
+        <label>Context<input id="llmNumCtx" type="number" min="512" step="512"></label>
+        <label>Max tokens<input id="llmNumPredict" type="number" min="16" step="16"></label>
+        <label class="check"><input id="llmThink" type="checkbox"> Thinking</label>
       </div>
       <div class="toolbar">
         <button id="startLlm">Start Ollama</button>
@@ -759,7 +799,7 @@ INDEX_HTML = """<!doctype html>
       </div>
     </section>
   </main>
-  <script src="/app.js?v=8"></script>
+  <script src="/app.js?v=9"></script>
 </body>
 </html>
 """
@@ -1112,7 +1152,7 @@ APP_JS = """
 const fields = [
   "comfyUrl", "comfyDir", "modelsRoot", "outputDir", "description", "batchSize", "seed",
   "steps", "highRes", "lowRes", "cfg", "loraName", "loraStrength", "timeout",
-  "llmProvider", "llmModel", "llmEndpoint"
+  "llmProvider", "llmModel", "llmEndpoint", "llmNumGpu", "llmNumCtx", "llmNumPredict", "llmThink"
 ];
 
 let currentRun = null;
@@ -1167,7 +1207,11 @@ function payload() {
     dry_run: $("dryRun").checked,
     llm_provider: $("llmProvider").value,
     llm_model: $("llmModel").value,
-    llm_endpoint: $("llmEndpoint").value
+    llm_endpoint: $("llmEndpoint").value,
+    llm_num_gpu: $("llmNumGpu").value,
+    llm_num_ctx: $("llmNumCtx").value,
+    llm_num_predict: $("llmNumPredict").value,
+    llm_think: $("llmThink").checked
   };
 }
 
@@ -1352,6 +1396,10 @@ function applyDefaults(data) {
   $("llmProvider").value = data.llm_provider;
   $("llmModel").value = data.llm_model;
   $("llmEndpoint").value = data.llm_endpoint;
+  $("llmNumGpu").value = data.llm_num_gpu;
+  $("llmNumCtx").value = data.llm_num_ctx;
+  $("llmNumPredict").value = data.llm_num_predict;
+  $("llmThink").checked = data.llm_think;
 }
 
 async function validateComfy() {

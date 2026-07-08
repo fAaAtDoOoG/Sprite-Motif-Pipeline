@@ -2,7 +2,8 @@ import pytest
 
 from sprite_motif_pipeline.prompting import PromptSpec
 from sprite_motif_pipeline import web_gui
-from sprite_motif_pipeline.web_gui import APP_JS, INDEX_HTML, WebAppState, auto_start_comfy_job, format_prompt_preview, schedule_auto_start_comfy
+from sprite_motif_pipeline.config import DEFAULT_PROMPT_MODEL, DEFAULT_PROMPT_MODEL_NUM_GPU
+from sprite_motif_pipeline.web_gui import APP_JS, INDEX_HTML, WebAppState, auto_start_comfy_job, default_payload, format_prompt_preview, schedule_auto_start_comfy
 
 
 def test_heartbeat_can_arm_and_disarm_auto_shutdown():
@@ -47,7 +48,17 @@ def test_browser_ui_contains_local_server_start_controls():
 def test_browser_ui_contains_user_input_history():
     assert "inputHistory" in INDEX_HTML
     assert "renderUserInputs" in APP_JS
-    assert "app.js?v=8" in INDEX_HTML
+    assert "app.js?v=9" in INDEX_HTML
+
+
+def test_browser_ui_defaults_to_32b_ollama_gpu_prompt_model():
+    payload = default_payload()
+
+    assert payload["llm_provider"] == "ollama"
+    assert payload["llm_model"] == DEFAULT_PROMPT_MODEL
+    assert payload["llm_num_gpu"] == DEFAULT_PROMPT_MODEL_NUM_GPU
+    assert "llmNumGpu" in INDEX_HTML
+    assert "llm_num_gpu" in APP_JS
 
 
 def test_auto_start_comfy_job_reuses_running_comfy(monkeypatch):

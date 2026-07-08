@@ -9,26 +9,57 @@ from typing import Any, Iterable
 
 import requests
 
-from .config import DEFAULT_NEGATIVE_PROMPT
+from .config import (
+    DEFAULT_NEGATIVE_PROMPT,
+    DEFAULT_PROMPT_MODEL,
+    DEFAULT_PROMPT_MODEL_NUM_CTX,
+    DEFAULT_PROMPT_MODEL_NUM_GPU,
+    DEFAULT_PROMPT_MODEL_NUM_PREDICT,
+    DEFAULT_PROMPT_MODEL_THINK,
+    DEFAULT_PROMPT_MODEL_TIMEOUT,
+)
 
 PIXEL_TRIGGER = "Pixel Art"
 
-SYSTEM_PROMPT = """You rewrite short user descriptions into prompts for a text-to-image model.
-The image target is always a static 2D pixel-art game character motif, generated high resolution and later downscaled to a tiny sprite.
-Return strict JSON with keys positive_prompt and negative_prompt.
+SYSTEM_PROMPT = """You convert user descriptions into image-generation prompt tags for a text-to-image model.
+The target is a static 2D pixel-art game character motif, generated high resolution and later downscaled to a tiny sprite.
+Return strict JSON with exactly two string keys: positive_prompt and negative_prompt.
 
-Hard requirements:
-- The positive prompt must start with "Pixel Art".
-- Classify the user's input into desired visual traits and explicit exclusions. Do not simply translate negated phrases into the positive prompt.
-- Treat negative_constraints in the user payload as mandatory exclusions. Keep those concepts out of positive_prompt and include them in negative_prompt.
-- Only add user-specific negative concepts when the user clearly asks to remove, avoid, forbid, or exclude them, or when they appear in negative_constraints. Do not infer ordinary design traits such as body shape, clothing, shells, armor, or materials as negative by default.
-- Describe exactly one full-body character, static, centered, facing right in side view or three-quarter side view.
-- Make the silhouette readable at 64x64: clean outline, limited palette, strong contrast, large simple shapes.
-- Prefer a neutral plain background and no readable text.
-- The negative prompt must be specific and useful. It must reject photorealism, 3D render style, painterly/soft rendering, blur, motion/action poses, busy backgrounds, readable text, logos, watermarks, and tiny clutter that would fail after 64x64 downscaling.
-- Tailor the negative prompt to the description and feedback when needed, for example excluding unwanted props, backgrounds, poses, styles, or motifs that conflict with the requested sprite.
+Output format:
+- positive_prompt and negative_prompt must be comma-separated prompt tags or short prompt phrases.
+- Do not write prose sentences, explanations, bullet points, markdown fences, paragraphs, or quoted lists inside the JSON values.
+- Use English prompt terms only. Translate non-English user concepts into concise English tags.
+- Each tag should usually be 1 to 6 words.
+- positive_prompt must start with "Pixel Art".
+
+Semantic task:
+- Read the full user wording and decide which concepts are desired visual traits and which concepts are exclusions or rejections.
+- Use contextual language understanding, not a fixed keyword list. The same concept can be positive in one request and negative in another.
+- Internally identify visual concepts the user wants to appear.
+- Internally identify visual concepts the user says are absent, excluded, rejected, removed, or forbidden.
+- Write positive_prompt as tag phrases for the intended design.
+- Write negative_prompt starting with every user-specific excluded or absent visual concept as plain concept tags, followed by generic bad-quality tags.
+- Put desired traits only in positive_prompt.
+- Put excluded, absent, forbidden, or rejected visual concepts in negative_prompt.
+- A positive tag may include absence or negation language when it describes the intended design condition.
+- However, every excluded, absent, forbidden, or rejected visual concept from the user's wording must also appear as a plain underlying concept tag in negative_prompt.
+- Do not rely only on a positive absence phrase. If a visual concept is negated, also include that visual concept in negative_prompt.
+- User-specific exclusion tags in negative_prompt must be clean underlying nouns or noun phrases, without negation grammar and without extra adjectives.
+- For every user language, use contextual language understanding to detect absence, nonexistence, exclusion, removal, or avoidance.
+- Do not invent extra user-specific negative tags that the user did not exclude. Generic bad-quality tags are allowed after user-specific exclusions.
+- Do not invent replacement traits just to explain an exclusion. Only add a positive replacement when the user actually describes it.
+- Preserve the user's intended character identity, body shape, materials, surface details, mood, and revision request.
+
+Abstract rule example, not content to copy:
+- Input meaning: desired A, no B, without C.
+- Correct positive_prompt pattern: Pixel Art, A, no B, without C.
+- Correct negative_prompt pattern: B, C, photorealistic rendering, 3D render.
+- Wrong negative_prompt pattern: photorealistic rendering, 3D render.
+
+Sprite constraints:
+- Include concise positive tags for one full-body character, static pose, centered composition, facing right, side view or three-quarter side view, readable silhouette, limited palette, strong contrast, and plain neutral background when they fit.
+- Include concise negative tags for image-generation failures such as photorealistic rendering, 3D render, painterly rendering, blurry silhouette, dynamic pose, busy background, readable text, logo, watermark, and tiny clutter.
 - Do not mention copyrighted characters, brands, logos, or living artists unless the user explicitly supplied them.
-- Preserve the user's core identity, costume, mood, and revision request.
 - If previous_prompt is provided, keep its successful character identity and only adjust the requested parts.
 """
 
@@ -42,32 +73,42 @@ class PromptSpec:
 
 
 @dataclass(frozen=True)
-class PromptIntent:
-    positive_text: str
-    negative_terms: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
 class LLMConfig:
     provider: str = "none"
     model: str = ""
     endpoint: str = ""
     api_key: str = ""
-    temperature: float = 0.2
-    timeout_s: int = 60
+    temperature: float = 0.1
+    timeout_s: int = DEFAULT_PROMPT_MODEL_TIMEOUT
     keep_alive: str | int = "0"
+    ollama_num_gpu: int | None = DEFAULT_PROMPT_MODEL_NUM_GPU
+    ollama_num_ctx: int | None = DEFAULT_PROMPT_MODEL_NUM_CTX
+    ollama_num_predict: int | None = DEFAULT_PROMPT_MODEL_NUM_PREDICT
+    think: bool = DEFAULT_PROMPT_MODEL_THINK
 
     @classmethod
     def from_env(cls) -> "LLMConfig":
         provider = os.environ.get("SPRITEPIPE_LLM_PROVIDER", "none").strip().lower()
+        model = os.environ.get("SPRITEPIPE_LLM_MODEL", "").strip()
+        if provider == "ollama" and not model:
+            model = DEFAULT_PROMPT_MODEL
+
+        default_num_gpu = DEFAULT_PROMPT_MODEL_NUM_GPU if provider == "ollama" else None
+        default_num_ctx = DEFAULT_PROMPT_MODEL_NUM_CTX if provider == "ollama" else None
+        default_num_predict = DEFAULT_PROMPT_MODEL_NUM_PREDICT if provider == "ollama" else None
+
         return cls(
             provider=provider,
-            model=os.environ.get("SPRITEPIPE_LLM_MODEL", "").strip(),
+            model=model,
             endpoint=os.environ.get("SPRITEPIPE_LLM_ENDPOINT", "").strip(),
             api_key=os.environ.get("SPRITEPIPE_LLM_API_KEY", "").strip(),
-            temperature=float(os.environ.get("SPRITEPIPE_LLM_TEMPERATURE", "0.2")),
-            timeout_s=int(os.environ.get("SPRITEPIPE_LLM_TIMEOUT", "60")),
+            temperature=float(os.environ.get("SPRITEPIPE_LLM_TEMPERATURE", "0.1")),
+            timeout_s=int(os.environ.get("SPRITEPIPE_LLM_TIMEOUT", str(DEFAULT_PROMPT_MODEL_TIMEOUT))),
             keep_alive=os.environ.get("SPRITEPIPE_LLM_KEEP_ALIVE", "0").strip(),
+            ollama_num_gpu=_optional_int(os.environ.get("SPRITEPIPE_OLLAMA_NUM_GPU", ""), default=default_num_gpu),
+            ollama_num_ctx=_optional_int(os.environ.get("SPRITEPIPE_OLLAMA_NUM_CTX", ""), default=default_num_ctx),
+            ollama_num_predict=_optional_int(os.environ.get("SPRITEPIPE_OLLAMA_NUM_PREDICT", ""), default=default_num_predict),
+            think=_bool_env(os.environ.get("SPRITEPIPE_LLM_THINK", ""), default=DEFAULT_PROMPT_MODEL_THINK),
         )
 
 
@@ -94,14 +135,10 @@ def compose_prompt(
         )
 
     clean_description = _clean_one_line(description or "")
-    description_intent = split_prompt_intent(clean_description)
-    clean_description = description_intent.positive_text
     if not clean_description:
         clean_description = "an original adventurer character"
 
-    feedback_intent = split_prompt_intent(feedback or "")
-    clean_feedback = feedback_intent.positive_text or None
-    negative_constraints = _dedupe_terms([*description_intent.negative_terms, *feedback_intent.negative_terms])
+    clean_feedback = _clean_one_line(feedback or "") or None
 
     config = llm_config or LLMConfig.from_env()
     if config.provider and config.provider != "none":
@@ -112,12 +149,11 @@ def compose_prompt(
                 previous_prompt,
                 previous_negative_prompt,
                 config,
-                negative_constraints,
             )
         except Exception as exc:  # noqa: BLE001 - fallback is an intentional UX feature.
             if not allow_fallback:
                 raise
-            fallback = _compose_fallback(clean_description, clean_feedback, previous_prompt, negative_constraints)
+            fallback = _compose_fallback(clean_description, clean_feedback, previous_prompt)
             return PromptSpec(
                 positive_prompt=fallback.positive_prompt,
                 negative_prompt=fallback.negative_prompt,
@@ -125,35 +161,7 @@ def compose_prompt(
                 notes=f"LLM prompt rewrite failed, used deterministic fallback: {exc}",
             )
 
-    return _compose_fallback(clean_description, clean_feedback, previous_prompt, negative_constraints)
-
-
-def split_prompt_intent(text: str | None) -> PromptIntent:
-    clean = _clean_one_line(text or "")
-    if not clean:
-        return PromptIntent("")
-
-    positive_parts: list[str] = []
-    negative_terms: list[str] = []
-
-    for raw_part in re.split(r"[,，;；、。.!?？\n\r]+", clean):
-        part = _clean_clause(raw_part)
-        if not part:
-            continue
-
-        positive_prefix, extracted_terms = _extract_negative_clause(part)
-        if extracted_terms:
-            if positive_prefix:
-                positive_parts.append(positive_prefix)
-            negative_terms.extend(extracted_terms)
-            continue
-
-        positive_parts.append(part)
-
-    return PromptIntent(
-        positive_text=_clean_one_line(", ".join(positive_parts)),
-        negative_terms=tuple(_dedupe_terms(negative_terms)),
-    )
+    return _compose_fallback(clean_description, clean_feedback, previous_prompt)
 
 
 def ensure_pixel_trigger(prompt: str) -> str:
@@ -167,7 +175,6 @@ def _compose_fallback(
     description: str,
     feedback: str | None,
     previous_prompt: str | None,
-    negative_constraints: Iterable[str] = (),
 ) -> PromptSpec:
     revision = _clean_one_line(feedback or "")
     previous = _clean_one_line(previous_prompt or "")
@@ -188,9 +195,9 @@ def _compose_fallback(
     )
     return PromptSpec(
         positive_prompt=positive,
-        negative_prompt=_merge_negative_prompt(DEFAULT_NEGATIVE_PROMPT, negative_constraints),
+        negative_prompt=DEFAULT_NEGATIVE_PROMPT,
         source="fallback",
-        notes="Deterministic prompt composer used; set SPRITEPIPE_LLM_PROVIDER for LLM rewriting.",
+        notes="Deterministic prompt composer used; set SPRITEPIPE_LLM_PROVIDER for semantic prompt rewriting.",
     )
 
 
@@ -200,16 +207,12 @@ def _compose_with_llm(
     previous_prompt: str | None,
     previous_negative_prompt: str | None,
     config: LLMConfig,
-    negative_constraints: Iterable[str] = (),
 ) -> PromptSpec:
-    required_negative_terms = _dedupe_terms(negative_constraints)
     user_payload = {
         "description": description,
         "previous_prompt": previous_prompt or "",
         "previous_negative_prompt": previous_negative_prompt or "",
         "feedback": feedback or "",
-        "negative_constraints": required_negative_terms,
-        "examples": _select_examples(description, feedback),
     }
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -232,12 +235,7 @@ def _compose_with_llm(
         negative = DEFAULT_NEGATIVE_PROMPT
 
     positive = _enforce_core_constraints(positive)
-    negative = _remove_protected_positive_terms_from_negative(
-        negative,
-        _protected_positive_terms(description, feedback),
-        required_negative_terms,
-    )
-    negative = _enforce_negative_constraints(_merge_negative_prompt(negative, required_negative_terms))
+    negative = _enforce_negative_constraints(negative)
     return PromptSpec(
         positive_prompt=positive,
         negative_prompt=negative,
@@ -274,6 +272,13 @@ def _call_ollama(messages: list[dict[str, str]], config: LLMConfig) -> str:
     base = (config.endpoint or "http://127.0.0.1:11434").rstrip("/")
     if not config.model:
         raise ValueError("SPRITEPIPE_LLM_MODEL is required for Ollama")
+    options: dict[str, int | float] = {"temperature": config.temperature}
+    if config.ollama_num_gpu is not None:
+        options["num_gpu"] = config.ollama_num_gpu
+    if config.ollama_num_ctx is not None:
+        options["num_ctx"] = config.ollama_num_ctx
+    if config.ollama_num_predict is not None:
+        options["num_predict"] = config.ollama_num_predict
     try:
         response = requests.post(
             f"{base}/api/chat",
@@ -283,7 +288,8 @@ def _call_ollama(messages: list[dict[str, str]], config: LLMConfig) -> str:
                 "stream": False,
                 "format": "json",
                 "keep_alive": _coerce_keep_alive(config.keep_alive),
-                "options": {"temperature": config.temperature},
+                "think": config.think,
+                "options": options,
             },
             timeout=config.timeout_s,
         )
@@ -347,168 +353,6 @@ def _enforce_negative_constraints(prompt: str) -> str:
     return prompt
 
 
-def _extract_negative_clause(part: str) -> tuple[str, list[str]]:
-    chinese_markers = [
-        "不要出现",
-        "不能出现",
-        "不能有",
-        "不需要",
-        "不要",
-        "没有",
-        "避免",
-        "禁止",
-        "去掉",
-        "移除",
-        "排除",
-        "别出现",
-        "别有",
-        "别",
-        "无",
-    ]
-    candidates: list[tuple[int, str]] = []
-    for marker in chinese_markers:
-        index = part.find(marker)
-        if index < 0:
-            continue
-        if marker == "无" and index != 0:
-            continue
-        candidates.append((index, marker))
-
-    english_match = re.search(
-        r"\b(no visible|no|without|avoid|exclude|remove|not)\b\s+(?P<target>.+)$",
-        part,
-        flags=re.IGNORECASE,
-    )
-    if english_match:
-        candidates.append((english_match.start(), english_match.group(1)))
-
-    if not candidates:
-        return "", []
-
-    index, marker = min(candidates, key=lambda item: item[0])
-    target_start = index + len(marker)
-    positive_prefix = _clean_clause(part[:index])
-    target = _clean_clause(part[target_start:])
-    return positive_prefix, _split_negative_targets(target)
-
-
-def _split_negative_targets(text: str) -> list[str]:
-    clean = _clean_clause(text)
-    if not clean:
-        return []
-    clean = re.sub(r"^(任何|任意|所有|明显的?)\s*", "", clean, flags=re.IGNORECASE)
-    clean = re.sub(r"\s*(等|等等|之类|这类|这些|这种|etc\.?)$", "", clean, flags=re.IGNORECASE)
-    pieces = re.split(r"\s*(?:、|/|或|或者|和|与|及|以及|\band\b|\bor\b)\s*", clean, flags=re.IGNORECASE)
-    return _dedupe_terms(_normalize_negative_term(piece) for piece in pieces if _clean_clause(piece))
-
-
-def _normalize_negative_term(term: str) -> str:
-    clean = _clean_clause(term)
-    clean = re.sub(r"^(不要|不需要|不能出现|不能有|没有|避免|禁止|去掉|移除|排除|别出现|别有|别|无)\s*", "", clean)
-    clean = re.sub(r"^(no visible|no|without|avoid|exclude|remove|not)\s+", "", clean, flags=re.IGNORECASE)
-    clean = re.sub(r"\s*(等|等等|之类|这类|这些|这种|etc\.?)$", "", clean, flags=re.IGNORECASE)
-    translations = {
-        "牙": "teeth",
-        "牙齿": "teeth",
-        "尖牙": "fangs",
-        "獠牙": "fangs",
-        "可见肌肉": "visible muscles",
-        "明显肌肉": "visible muscles",
-        "暴露肌肉": "exposed muscles",
-        "裸露肌肉": "exposed muscles",
-        "外露肌肉": "exposed muscles",
-        "肌肉组织": "muscle tissue",
-        "血肉": "gore",
-        "血液": "blood",
-        "血": "blood",
-        "内脏": "organs",
-        "肠子": "intestines",
-        "骨头": "bones",
-        "骷髅": "skull",
-    }
-    return translations.get(clean, clean)
-
-
-def _merge_negative_prompt(prompt: str, terms: Iterable[str]) -> str:
-    additions = _dedupe_terms(terms)
-    if not additions:
-        return prompt
-    lower_prompt = prompt.lower()
-    missing = [term for term in additions if term.lower() not in lower_prompt]
-    if missing:
-        return f"{prompt}, {', '.join(missing)}"
-    return prompt
-
-
-def _remove_protected_positive_terms_from_negative(
-    prompt: str,
-    protected_terms: Iterable[str],
-    required_negative_terms: Iterable[str],
-) -> str:
-    protected = _dedupe_terms(protected_terms)
-    required = {term.lower() for term in _dedupe_terms(required_negative_terms)}
-    if not protected:
-        return prompt
-
-    kept: list[str] = []
-    for part in re.split(r"[,，;；、\n\r]+", prompt):
-        clean = _clean_clause(part)
-        if not clean:
-            continue
-        if _negative_item_matches_protected_positive(clean, protected, required):
-            continue
-        kept.append(clean)
-    return ", ".join(kept) if kept else prompt
-
-
-def _negative_item_matches_protected_positive(item: str, protected_terms: Iterable[str], required_terms: set[str]) -> bool:
-    item_key = item.lower()
-    if item_key in required_terms:
-        return False
-    for protected in protected_terms:
-        protected_key = protected.lower()
-        if item_key == protected_key:
-            return True
-        if _contains_cjk(item) and len(item) >= 2 and item in protected:
-            return True
-        if len(item_key) >= 4 and re.search(r"[a-zA-Z]", item) and item_key in protected_key:
-            return True
-    return False
-
-
-def _protected_positive_terms(*values: str | None) -> list[str]:
-    terms: list[str] = []
-    for value in values:
-        for part in re.split(r"[,，;；、。.!?？\n\r]+", value or ""):
-            clean = _clean_clause(part)
-            if clean:
-                terms.append(clean)
-    return _dedupe_terms(terms)
-
-
-def _contains_cjk(value: str) -> bool:
-    return bool(re.search(r"[\u4e00-\u9fff]", value))
-
-
-def _dedupe_terms(terms: Iterable[str]) -> list[str]:
-    unique: list[str] = []
-    seen: set[str] = set()
-    for term in terms:
-        clean = _clean_clause(str(term))
-        if not clean:
-            continue
-        key = clean.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(clean)
-    return unique
-
-
-def _clean_clause(value: str) -> str:
-    return re.sub(r"\s+", " ", value).strip(" \t\r\n,，;；、。.!?？:：()（）[]【】\"'")
-
-
 def _select_examples(description: str, feedback: str | None) -> list[dict[str, str]]:
     examples = list(load_prompt_examples())
     haystack = f"{description} {feedback or ''}".lower()
@@ -539,3 +383,17 @@ def _coerce_keep_alive(value: str | int) -> str | int:
     if re.fullmatch(r"-?\d+", stripped):
         return int(stripped)
     return stripped
+
+
+def _optional_int(value: str | None, *, default: int | None = None) -> int | None:
+    stripped = (value or "").strip()
+    if not stripped:
+        return default
+    return int(stripped)
+
+
+def _bool_env(value: str | None, *, default: bool = False) -> bool:
+    stripped = (value or "").strip().lower()
+    if not stripped:
+        return default
+    return stripped in {"1", "true", "yes", "on"}

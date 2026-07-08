@@ -242,6 +242,10 @@ def _llm_config_from_args(args: argparse.Namespace) -> LLMConfig:
         temperature=config.temperature,
         timeout_s=config.timeout_s,
         keep_alive=config.keep_alive,
+        ollama_num_gpu=config.ollama_num_gpu,
+        ollama_num_ctx=config.ollama_num_ctx,
+        ollama_num_predict=config.ollama_num_predict,
+        think=config.think,
     )
 
 

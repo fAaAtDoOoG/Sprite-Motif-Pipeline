@@ -51,7 +51,7 @@ uv run spritepipe-web --port 7865
 
 网页 GUI 支持描述生成、直接 prompt、批量参数、候选预览、选择候选后反馈迭代，以及 ComfyUI 节点和模型文件校验。
 网页启动时会先尝试连接 `http://127.0.0.1:8188`，如果已有 ComfyUI 在运行就直接复用；如果没有运行，会按默认 `ComfyUI Folder` 自动启动本地 ComfyUI。Backend 区域里的 `Start ComfyUI` 仍可手动重试，支持常见的 `run_nvidia_gpu.bat`、portable `python_embeded` 和 `main.py` 方式；`Start Ollama` 可以显式启动本地 Ollama 服务。如果不想启动时自动检查 ComfyUI，可使用 `uv run spritepipe-web --no-auto-comfy`。
-默认 prompt model 会选择本地 Ollama 的 `qwen2.5:7b-instruct`。网页中的 `Validate Prompt Model` 会检查 Ollama 服务和模型，缺少模型时可直接拉取；下载和生成过程都会显示进度条与日志。网页 GUI 在 `Provider = ollama` 时会在预览、生成和迭代前先校验 prompt model，避免误以为用了 LLM 但实际走了 fallback；如果想显式使用内置规则，把 `Provider` 改成 `none`。Prompt composer 会先把用户输入拆成正向需求和明确排除项，例如 `无牙齿`、`不要牙齿`、`without teeth` 会进入 negative prompt；普通设计元素如肌肉、外壳、盔甲会保留为正向需求，除非用户明确写“不要/避免/移除”。
+默认 prompt model 会选择本地 Ollama 的 `qwen3:32b`，并在 Ollama 请求里默认使用 `num_gpu=999`、`num_ctx=4096`、`num_predict=256`，以便尽量让 32B prompt rewrite 走 GPU。网页中的 `Validate Prompt Model` 会检查 Ollama 服务和模型，缺少模型时可直接拉取；下载和生成过程都会显示进度条与日志。网页 GUI 在 `Provider = ollama` 时会在预览、生成和迭代前先校验 prompt model，避免误以为用了 LLM 但实际走了 fallback；如果想显式使用内置规则，把 `Provider` 改成 `none`。启用 prompt model 时，用户原始描述会交给 LLM 自行判断哪些内容属于正向需求、哪些属于 negative prompt；代码不会用固定中文关键词或词表替 LLM 硬拆。
 `Preview Prompt` 现在也会作为后台任务运行并更新顶部进度条，不会在等待本地 LLM 时看起来像没反应。默认情况下，pipeline 会给 Ollama prompt rewrite 请求发送 `keep_alive=0`，让 prompt model 用完后立即卸载；网页里也有 `Unload Prompt Model` 按钮可以手动释放。若你希望连续改 prompt 时更快、且机器内存足够，可以在启动 GUI 前设置 `$env:SPRITEPIPE_LLM_KEEP_ALIVE="5m"`。
 生成完成后，候选预览默认显示左右对照：左侧 high-res，右侧把 low-res 按 pixel-perfect 方式放大到 high-res 同尺寸；预览器支持鼠标滚轮缩放、左键拖动，以及移动/放大/缩小按钮。
 GUI 里的 `Models` 默认指向本机可发现的 ComfyUI `models` 文件夹。点击 `Validate ComfyUI` 后，如果缺少默认 safetensors，会询问是否自动下载到该文件夹。
@@ -124,10 +124,14 @@ Ollama:
 ```powershell
 $env:SPRITEPIPE_LLM_PROVIDER="ollama"
 $env:SPRITEPIPE_LLM_ENDPOINT="http://127.0.0.1:11434"
-$env:SPRITEPIPE_LLM_MODEL="qwen2.5:7b-instruct"
+$env:SPRITEPIPE_LLM_MODEL="qwen3:32b"
+$env:SPRITEPIPE_OLLAMA_NUM_GPU="999"
+$env:SPRITEPIPE_OLLAMA_NUM_CTX="4096"
+$env:SPRITEPIPE_OLLAMA_NUM_PREDICT="256"
 ```
 
 默认 `SPRITEPIPE_LLM_KEEP_ALIVE="0"`，也就是每次 prompt rewrite 完成后释放 Ollama prompt model，降低内存占用。可以改成 `"5m"`、`"30m"` 或 `"-1"` 来保留热加载；这只影响 prompt LLM，不会卸载 ComfyUI 里的 Qwen-Image 主模型。
+默认 `SPRITEPIPE_LLM_TIMEOUT="900"`，适配 `qwen3:32b` 的冷启动；网页 Prompt Model 区域也可以直接修改 GPU layers、Context、Max tokens 和 Thinking。
 
 内置的 prompt curriculum 在 `src/sprite_motif_pipeline/prompt_training_examples.jsonl`。它既作为运行时 few-shot 示例，也可以作为后续微调 prompt LLM 的 starter 数据。
 
