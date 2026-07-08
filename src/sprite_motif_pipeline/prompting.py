@@ -19,9 +19,9 @@ Return strict JSON with keys positive_prompt and negative_prompt.
 
 Hard requirements:
 - The positive prompt must start with "Pixel Art".
-- Classify the user's input into desired visual traits and exclusions. Do not simply translate negated phrases into the positive prompt.
+- Classify the user's input into desired visual traits and explicit exclusions. Do not simply translate negated phrases into the positive prompt.
 - Treat negative_constraints in the user payload as mandatory exclusions. Keep those concepts out of positive_prompt and include them in negative_prompt.
-- Chinese or English phrases like "无牙齿", "不要牙齿", "without teeth", "avoid teeth", or unwanted exposed anatomy such as "可见肌肉" should become negative_prompt concepts like "teeth" or "visible muscles".
+- Only add user-specific negative concepts when the user clearly asks to remove, avoid, forbid, or exclude them, or when they appear in negative_constraints. Do not infer ordinary design traits such as body shape, clothing, shells, armor, or materials as negative by default.
 - Describe exactly one full-body character, static, centered, facing right in side view or three-quarter side view.
 - Make the silhouette readable at 64x64: clean outline, limited palette, strong contrast, large simple shapes.
 - Prefer a neutral plain background and no readable text.
@@ -113,8 +113,6 @@ def compose_prompt(
                 previous_negative_prompt,
                 config,
                 negative_constraints,
-                raw_description=_clean_one_line(description or ""),
-                raw_feedback=_clean_one_line(feedback or ""),
             )
         except Exception as exc:  # noqa: BLE001 - fallback is an intentional UX feature.
             if not allow_fallback:
@@ -137,7 +135,6 @@ def split_prompt_intent(text: str | None) -> PromptIntent:
 
     positive_parts: list[str] = []
     negative_terms: list[str] = []
-    negative_context = False
 
     for raw_part in re.split(r"[,，;；、。.!?？\n\r]+", clean):
         part = _clean_clause(raw_part)
@@ -149,16 +146,9 @@ def split_prompt_intent(text: str | None) -> PromptIntent:
             if positive_prefix:
                 positive_parts.append(positive_prefix)
             negative_terms.extend(extracted_terms)
-            negative_context = True
-            continue
-
-        if _looks_like_negative_fragment(part, carry_context=negative_context):
-            negative_terms.extend(_split_negative_targets(part))
-            negative_context = True
             continue
 
         positive_parts.append(part)
-        negative_context = False
 
     return PromptIntent(
         positive_text=_clean_one_line(", ".join(positive_parts)),
@@ -211,18 +201,13 @@ def _compose_with_llm(
     previous_negative_prompt: str | None,
     config: LLMConfig,
     negative_constraints: Iterable[str] = (),
-    *,
-    raw_description: str = "",
-    raw_feedback: str = "",
 ) -> PromptSpec:
     required_negative_terms = _dedupe_terms(negative_constraints)
     user_payload = {
         "description": description,
-        "raw_user_description": raw_description or description,
         "previous_prompt": previous_prompt or "",
         "previous_negative_prompt": previous_negative_prompt or "",
         "feedback": feedback or "",
-        "raw_feedback": raw_feedback,
         "negative_constraints": required_negative_terms,
         "examples": _select_examples(description, feedback),
     }
@@ -247,6 +232,11 @@ def _compose_with_llm(
         negative = DEFAULT_NEGATIVE_PROMPT
 
     positive = _enforce_core_constraints(positive)
+    negative = _remove_protected_positive_terms_from_negative(
+        negative,
+        _protected_positive_terms(description, feedback),
+        required_negative_terms,
+    )
     negative = _enforce_negative_constraints(_merge_negative_prompt(negative, required_negative_terms))
     return PromptSpec(
         positive_prompt=positive,
@@ -412,30 +402,6 @@ def _split_negative_targets(text: str) -> list[str]:
     return _dedupe_terms(_normalize_negative_term(piece) for piece in pieces if _clean_clause(piece))
 
 
-def _looks_like_negative_fragment(part: str, *, carry_context: bool) -> bool:
-    lowered = part.lower()
-    anatomy_keywords = [
-        "可见肌肉",
-        "暴露肌肉",
-        "裸露肌肉",
-        "外露肌肉",
-        "肌肉组织",
-        "血肉",
-        "内脏",
-        "肠子",
-        "gore",
-        "visible muscle",
-        "exposed muscle",
-        "muscle tissue",
-        "organs",
-        "intestines",
-    ]
-    if any(keyword in lowered for keyword in anatomy_keywords):
-        return True
-    carry_keywords = ["牙齿", "牙", "teeth", "tooth", "fangs"]
-    return carry_context and any(keyword in lowered for keyword in carry_keywords)
-
-
 def _normalize_negative_term(term: str) -> str:
     clean = _clean_clause(term)
     clean = re.sub(r"^(不要|不需要|不能出现|不能有|没有|避免|禁止|去掉|移除|排除|别出现|别有|别|无)\s*", "", clean)
@@ -472,6 +438,56 @@ def _merge_negative_prompt(prompt: str, terms: Iterable[str]) -> str:
     if missing:
         return f"{prompt}, {', '.join(missing)}"
     return prompt
+
+
+def _remove_protected_positive_terms_from_negative(
+    prompt: str,
+    protected_terms: Iterable[str],
+    required_negative_terms: Iterable[str],
+) -> str:
+    protected = _dedupe_terms(protected_terms)
+    required = {term.lower() for term in _dedupe_terms(required_negative_terms)}
+    if not protected:
+        return prompt
+
+    kept: list[str] = []
+    for part in re.split(r"[,，;；、\n\r]+", prompt):
+        clean = _clean_clause(part)
+        if not clean:
+            continue
+        if _negative_item_matches_protected_positive(clean, protected, required):
+            continue
+        kept.append(clean)
+    return ", ".join(kept) if kept else prompt
+
+
+def _negative_item_matches_protected_positive(item: str, protected_terms: Iterable[str], required_terms: set[str]) -> bool:
+    item_key = item.lower()
+    if item_key in required_terms:
+        return False
+    for protected in protected_terms:
+        protected_key = protected.lower()
+        if item_key == protected_key:
+            return True
+        if _contains_cjk(item) and len(item) >= 2 and item in protected:
+            return True
+        if len(item_key) >= 4 and re.search(r"[a-zA-Z]", item) and item_key in protected_key:
+            return True
+    return False
+
+
+def _protected_positive_terms(*values: str | None) -> list[str]:
+    terms: list[str] = []
+    for value in values:
+        for part in re.split(r"[,，;；、。.!?？\n\r]+", value or ""):
+            clean = _clean_clause(part)
+            if clean:
+                terms.append(clean)
+    return _dedupe_terms(terms)
+
+
+def _contains_cjk(value: str) -> bool:
+    return bool(re.search(r"[\u4e00-\u9fff]", value))
 
 
 def _dedupe_terms(terms: Iterable[str]) -> list[str]:

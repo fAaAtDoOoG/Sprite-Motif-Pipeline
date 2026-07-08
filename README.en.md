@@ -137,7 +137,7 @@ $env:SPRITEPIPE_LLM_MODEL="qwen2.5:7b-instruct"
 
 The browser GUI defaults to Ollama `qwen2.5:7b-instruct`. When `Provider = ollama`, the web UI validates the prompt model before previewing, generating, or iterating, so it will not silently use the deterministic fallback while you expect the LLM. If the model is missing, use `Validate Prompt Model` or `Download Prompt Model` in the web UI. To explicitly use the built-in deterministic composer, set `Provider` to `none`.
 
-The prompt composer first separates desired traits from exclusions. For example, phrases such as `no teeth`, `without teeth`, `无牙齿`, or unwanted exposed anatomy such as `可见肌肉` are sent to the negative prompt instead of being translated into the positive prompt.
+The prompt composer first separates desired traits from explicit exclusions. For example, phrases such as `no teeth`, `without teeth`, or `无牙齿` are sent to the negative prompt instead of being translated into the positive prompt. Ordinary design traits such as muscles, shells, or armor stay positive unless the user explicitly asks to avoid or remove them.
 
 After generation, selecting a candidate shows high-res on the left and the low-res sprite on the right, upscaled pixel-perfect to the same displayed size as the high-res image. The viewer supports mouse-wheel zoom, left-button drag panning, movement buttons, and zoom in/out controls.
 
