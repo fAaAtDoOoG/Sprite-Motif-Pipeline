@@ -9,7 +9,7 @@ from .comfy import ComfyClient, validate_model_assets, validate_required_nodes
 from .config import DEFAULT_HIGH_RES, DEFAULT_LOW_RES, DEFAULTS, format_size, parse_size
 from .prompting import LLMConfig, compose_prompt
 from .runner import GenerationOptions, generate_batch
-from .session import Candidate, load_manifest, save_manifest
+from .session import Candidate, load_manifest, make_user_input, save_manifest, user_input_history
 from .workflow import build_api_prompt, export_api_prompt, required_node_types
 
 
@@ -108,10 +108,13 @@ def cmd_generate(args: argparse.Namespace) -> int:
 def cmd_iterate(args: argparse.Namespace) -> int:
     previous = load_manifest(args.run_dir)
     selected = _find_candidate(previous.candidates, args.index)
+    history = user_input_history(previous)
+    feedback_input = make_user_input("feedback", args.feedback, selected_index=args.index)
     spec = compose_prompt(
         previous.description,
         feedback=args.feedback,
         previous_prompt=selected.positive_prompt,
+        previous_negative_prompt=selected.negative_prompt,
         llm_config=_llm_config_from_args(args),
     )
     args.description = previous.description
@@ -123,9 +126,13 @@ def cmd_iterate(args: argparse.Namespace) -> int:
         parent_run=str(args.run_dir),
         selected_index=args.index,
         feedback=args.feedback,
+        user_inputs=[*history, feedback_input],
     )
     previous.selected_index = args.index
     previous.feedback = args.feedback
+    if not previous.user_inputs:
+        previous.user_inputs = history
+    previous.user_inputs.append(feedback_input)
     save_manifest(args.run_dir, previous)
     print(f"new run: {run_dir}")
     print(f"previous selection recorded in: {args.run_dir / 'manifest.json'}")
@@ -137,6 +144,9 @@ def cmd_inspect(args: argparse.Namespace) -> int:
     print(f"run_id: {manifest.run_id}")
     print(f"description: {manifest.description}")
     print(f"prompt_source: {manifest.prompt_source}")
+    for index, user_input in enumerate(user_input_history(manifest), start=1):
+        selected = "" if user_input.selected_index is None else f" candidate={user_input.selected_index}"
+        print(f"user_input[{index}] {user_input.kind}{selected}: {user_input.text}")
     for candidate in manifest.candidates:
         print(f"[{candidate.index}] seed={candidate.seed} lowres={candidate.lowres_path} highres={candidate.highres_path}")
     return 0
@@ -183,7 +193,9 @@ def _generate_batch(
     parent_run: str = "",
     selected_index: int | None = None,
     feedback: str = "",
+    user_inputs=None,
 ) -> Path:
+    input_kind = "direct_prompt" if getattr(args, "prompt", None) else "description"
     return generate_batch(
         prompt_spec,
         description=description,
@@ -204,6 +216,9 @@ def _generate_batch(
         parent_run=parent_run,
         selected_index=selected_index,
         feedback=feedback,
+        user_input_kind=input_kind,
+        user_input_text=description,
+        user_inputs=user_inputs,
         progress=print,
     )
 

@@ -23,7 +23,7 @@ from .ollama import DEFAULT_OLLAMA_ENDPOINT, pull_ollama_model, start_ollama_ser
 from .progress import generation_percent, percent_from_message, short_status
 from .prompting import LLMConfig, PromptSpec, compose_prompt
 from .runner import GenerationOptions, generate_batch
-from .session import Candidate, load_manifest, save_manifest
+from .session import Candidate, load_manifest, make_user_input, save_manifest, user_input_history
 from .workflow import required_node_types
 
 
@@ -420,10 +420,13 @@ def generate_job(payload: dict[str, Any], state: WebAppState, progress: Callable
     mode = str(payload.get("mode") or "description")
     text = str(payload.get("description") or payload.get("text") or "")
     description = text if mode == "description" else str(payload.get("prompt") or text)
+    input_kind = "direct_prompt" if mode == "prompt" else "description"
     run_dir = generate_batch(
         spec,
         description=description,
         options=options,
+        user_input_kind=input_kind,
+        user_input_text=description,
         progress=lambda message: progress(message, generation_percent(message, options.batch_size)),
     )
     return {"kind": "run", "run": run_response(run_dir)}
@@ -437,6 +440,8 @@ def iterate_job(payload: dict[str, Any], state: WebAppState, progress: Callable[
     feedback = str(payload.get("feedback") or "").strip()
     if not feedback:
         raise ValueError("Feedback is empty.")
+    history = user_input_history(manifest)
+    feedback_input = make_user_input("feedback", feedback, selected_index=candidate.index)
 
     config = llm_config_from_payload(payload)
     spec = compose_prompt(
@@ -456,10 +461,14 @@ def iterate_job(payload: dict[str, Any], state: WebAppState, progress: Callable[
         parent_run=str(run_dir),
         selected_index=candidate.index,
         feedback=feedback,
+        user_inputs=[*history, feedback_input],
         progress=lambda message: progress(message, generation_percent(message, options.batch_size)),
     )
     manifest.selected_index = candidate.index
     manifest.feedback = feedback
+    if not manifest.user_inputs:
+        manifest.user_inputs = history
+    manifest.user_inputs.append(feedback_input)
     save_manifest(run_dir, manifest)
     return {"kind": "run", "run": run_response(new_run_dir)}
 
@@ -574,7 +583,7 @@ INDEX_HTML = """<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Sprite Motif Pipeline</title>
-  <link rel="stylesheet" href="/style.css?v=6">
+  <link rel="stylesheet" href="/style.css?v=7">
 </head>
 <body>
   <header class="topbar">
@@ -702,6 +711,9 @@ INDEX_HTML = """<!doctype html>
         <a id="apiLink" target="_blank">API JSON</a>
       </div>
 
+      <div class="section-title">User Inputs</div>
+      <pre id="inputHistory"></pre>
+
       <div class="section-title">Iteration</div>
       <textarea id="feedback" rows="3">lighter armor, shorter hair, rounder silhouette</textarea>
       <div class="toolbar">
@@ -720,7 +732,7 @@ INDEX_HTML = """<!doctype html>
       </div>
     </section>
   </main>
-  <script src="/app.js?v=6"></script>
+  <script src="/app.js?v=7"></script>
 </body>
 </html>
 """
@@ -1035,7 +1047,7 @@ button.danger:hover {
   grid-template-columns: 1fr 1fr;
   gap: 12px;
 }
-#logBox {
+#logBox, #inputHistory {
   height: 210px;
   margin: 0;
   overflow: auto;
@@ -1045,6 +1057,12 @@ button.danger:hover {
   background: #222625;
   color: #e9eee9;
   white-space: pre-wrap;
+}
+#inputHistory {
+  height: 120px;
+  margin-bottom: 12px;
+  background: #f8faf8;
+  color: var(--ink);
 }
 
 @media (max-width: 980px) {
@@ -1537,6 +1555,7 @@ function renderRun(run) {
   currentRun = run;
   selectedIndex = run.candidates.length ? run.candidates[0].index : 0;
   $("runPath").value = run.run_dir;
+  renderUserInputs(run);
   $("candidateList").innerHTML = "";
   for (const candidate of run.candidates) {
     const item = document.createElement("button");
@@ -1552,6 +1571,19 @@ function renderRun(run) {
     showContactPreview(run.contact_sheet_url || "");
   }
   appendLog(`loaded=${run.run_dir}`);
+}
+
+function renderUserInputs(run) {
+  const inputs = Array.isArray(run.user_inputs) ? run.user_inputs.filter((item) => item && item.text) : [];
+  if (!inputs.length && run.description) {
+    inputs.push({ kind: "description", text: run.description, created_at: "", selected_index: null });
+  }
+  $("inputHistory").textContent = inputs.map((item, index) => {
+    const kind = item.kind || "input";
+    const selected = item.selected_index === null || item.selected_index === undefined ? "" : ` candidate=${item.selected_index}`;
+    const time = item.created_at ? ` ${item.created_at}` : "";
+    return `${index + 1}. ${kind}${selected}${time}\n${item.text}`;
+  }).join("\\n\\n");
 }
 
 function selectCandidate(index) {

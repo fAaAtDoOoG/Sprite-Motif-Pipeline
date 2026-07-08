@@ -20,7 +20,7 @@ from .ollama import DEFAULT_OLLAMA_ENDPOINT, OllamaValidation, pull_ollama_model
 from .progress import generation_percent, percent_from_message, short_status
 from .prompting import LLMConfig, compose_prompt
 from .runner import GenerationOptions, generate_batch
-from .session import Candidate, RunManifest, load_manifest, save_manifest
+from .session import Candidate, RunManifest, load_manifest, make_user_input, save_manifest, user_input_history
 from .workflow import required_node_types
 
 
@@ -373,7 +373,14 @@ class SpritePipeApp:
                 llm_config=llm_config,
             )
             self.events.put(("prompt", spec.positive_prompt))
-            return generate_batch(spec, description=text, options=options, progress=lambda message: self._queue_generation_progress(message, options.batch_size))
+            return generate_batch(
+                spec,
+                description=text,
+                options=options,
+                user_input_kind="direct_prompt" if mode == "prompt" else "description",
+                user_input_text=text,
+                progress=lambda message: self._queue_generation_progress(message, options.batch_size),
+            )
 
         self._run_worker("Generating", work, self.load_run, determinate=True)
 
@@ -398,12 +405,15 @@ class SpritePipeApp:
 
         previous_run = self.current_run_dir
         previous_manifest = self.current_manifest
+        history = user_input_history(previous_manifest)
+        feedback_input = make_user_input("feedback", feedback, selected_index=candidate.index)
 
         def work() -> Path:
             spec = compose_prompt(
                 previous_manifest.description,
                 feedback=feedback,
                 previous_prompt=candidate.positive_prompt,
+                previous_negative_prompt=candidate.negative_prompt,
                 llm_config=llm_config,
             )
             self.events.put(("prompt", spec.positive_prompt))
@@ -414,10 +424,14 @@ class SpritePipeApp:
                 parent_run=str(previous_run),
                 selected_index=candidate.index,
                 feedback=feedback,
+                user_inputs=[*history, feedback_input],
                 progress=lambda message: self._queue_generation_progress(message, options.batch_size),
             )
             previous_manifest.selected_index = candidate.index
             previous_manifest.feedback = feedback
+            if not previous_manifest.user_inputs:
+                previous_manifest.user_inputs = history
+            previous_manifest.user_inputs.append(feedback_input)
             save_manifest(previous_run, previous_manifest)
             return run_dir
 

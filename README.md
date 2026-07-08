@@ -135,7 +135,7 @@ $env:SPRITEPIPE_LLM_MODEL="qwen2.5:7b-instruct"
 
 每次生成会写入 `runs/run_YYYYMMDD_HHMMSS/`：
 
-- `manifest.json`：描述、prompt、seed、选择和候选信息
+- `manifest.json`：描述、用户原始输入历史、prompt、seed、选择和候选信息
 - `api_prompts/*.json`：每张候选的 ComfyUI API prompt
 - `highres/*.png`：ComfyUI 生成图
 - `lowres/*.png`：nearest-neighbor 低分辨率图

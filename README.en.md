@@ -155,7 +155,7 @@ The built-in prompt curriculum is stored at `src/sprite_motif_pipeline/prompt_tr
 
 Every generation run writes to `runs/run_YYYYMMDD_HHMMSS/`:
 
-- `manifest.json`: description, prompt, seed, selected candidate, and candidate metadata.
+- `manifest.json`: description, original user input history, prompt, seed, selected candidate, and candidate metadata.
 - `api_prompts/*.json`: the ComfyUI API prompt for each candidate.
 - `highres/*.png`: generated ComfyUI images.
 - `lowres/*.png`: nearest-neighbor downscaled sprite images.

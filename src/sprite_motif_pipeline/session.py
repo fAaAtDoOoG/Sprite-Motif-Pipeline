@@ -1,13 +1,21 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from .config import Size, format_size
 from .prompting import PromptSpec
+
+
+@dataclass
+class UserInput:
+    kind: str
+    text: str
+    created_at: str = ""
+    selected_index: int | None = None
 
 
 @dataclass
@@ -33,6 +41,7 @@ class RunManifest:
     parent_run: str = ""
     selected_index: int | None = None
     feedback: str = ""
+    user_inputs: list[UserInput] = field(default_factory=list)
     candidates: list[Candidate] = field(default_factory=list)
 
     def to_json(self) -> str:
@@ -59,8 +68,25 @@ def save_manifest(run_dir: Path, manifest: RunManifest) -> Path:
 
 def load_manifest(run_dir: Path) -> RunManifest:
     data: dict[str, Any] = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
-    candidates = [Candidate(**candidate) for candidate in data.pop("candidates", [])]
-    return RunManifest(**data, candidates=candidates)
+    candidates = [_from_dict(Candidate, candidate) for candidate in data.pop("candidates", [])]
+    user_inputs = [_from_dict(UserInput, user_input) for user_input in data.pop("user_inputs", [])]
+    return RunManifest(**data, candidates=candidates, user_inputs=user_inputs)
+
+
+def make_user_input(kind: str, text: str, selected_index: int | None = None) -> UserInput:
+    return UserInput(
+        kind=kind,
+        text=text,
+        selected_index=selected_index,
+        created_at=datetime.now().isoformat(timespec="seconds"),
+    )
+
+
+def user_input_history(manifest: RunManifest) -> list[UserInput]:
+    history = list(manifest.user_inputs)
+    if not history and manifest.description.strip():
+        history.append(make_user_input("description", manifest.description))
+    return history
 
 
 def create_manifest(
@@ -72,7 +98,15 @@ def create_manifest(
     low_res: Size,
     parent_run: str = "",
     feedback: str = "",
+    user_input_kind: str = "description",
+    user_input_text: str | None = None,
+    user_inputs: list[UserInput] | None = None,
 ) -> RunManifest:
+    history = list(user_inputs or [])
+    if not history:
+        text = (description if user_input_text is None else user_input_text).strip()
+        if text:
+            history.append(make_user_input(user_input_kind, text))
     return RunManifest(
         run_id=run_dir.name,
         description=description,
@@ -82,4 +116,10 @@ def create_manifest(
         low_res=format_size(low_res),
         parent_run=parent_run,
         feedback=feedback,
+        user_inputs=history,
     )
+
+
+def _from_dict(cls, data: dict[str, Any]):
+    allowed = {field.name for field in fields(cls)}
+    return cls(**{key: value for key, value in data.items() if key in allowed})

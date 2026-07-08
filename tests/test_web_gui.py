@@ -43,6 +43,12 @@ def test_browser_ui_contains_local_server_start_controls():
     assert "/api/start-llm" in APP_JS
 
 
+def test_browser_ui_contains_user_input_history():
+    assert "inputHistory" in INDEX_HTML
+    assert "renderUserInputs" in APP_JS
+    assert "app.js?v=7" in INDEX_HTML
+
+
 def test_prompt_preview_includes_negative_prompt():
     spec = PromptSpec(
         positive_prompt="Pixel Art, character",

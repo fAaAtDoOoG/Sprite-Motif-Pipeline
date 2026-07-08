@@ -9,7 +9,7 @@ from .comfy import ComfyClient
 from .config import DEFAULT_HIGH_RES, DEFAULT_LOW_RES, DEFAULTS, Size, format_size, parse_size
 from .postprocess import downscale_nearest, make_contact_sheet
 from .prompting import PromptSpec
-from .session import Candidate, create_manifest, new_run_dir, save_manifest
+from .session import Candidate, UserInput, create_manifest, new_run_dir, save_manifest
 from .workflow import build_api_prompt, export_api_prompt
 
 ProgressCallback = Callable[[str], None]
@@ -39,6 +39,9 @@ def generate_batch(
     parent_run: str = "",
     selected_index: int | None = None,
     feedback: str = "",
+    user_input_kind: str = "description",
+    user_input_text: str | None = None,
+    user_inputs: list[UserInput] | None = None,
     progress: ProgressCallback | None = None,
 ) -> Path:
     high_res = _coerce_size(options.high_res, DEFAULT_HIGH_RES)
@@ -55,6 +58,9 @@ def generate_batch(
         low_res=low_res,
         parent_run=parent_run,
         feedback=feedback,
+        user_input_kind=user_input_kind,
+        user_input_text=user_input_text,
+        user_inputs=user_inputs,
     )
     manifest.selected_index = selected_index
 
