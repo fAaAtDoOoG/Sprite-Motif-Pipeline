@@ -77,6 +77,8 @@ def test_llm_receives_raw_user_text_for_semantic_classification(monkeypatch):
     assert "negative_constraints" not in captured["payload"]
     assert "raw_user_description" not in captured["payload"]
     assert "fixed keyword list" in captured["system"]
+    assert "Motif cohesion" in captured["system"]
+    assert "Do not split modifiers away from the thing they describe" in captured["system"]
     assert "teeth" in spec.negative_prompt
     assert "visible muscles" in spec.positive_prompt
     assert "shell armor" in spec.positive_prompt

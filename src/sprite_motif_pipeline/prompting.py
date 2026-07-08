@@ -26,18 +26,29 @@ The target is a static 2D pixel-art game character motif, generated high resolut
 Return strict JSON with exactly two string keys: positive_prompt and negative_prompt.
 
 Output format:
-- positive_prompt and negative_prompt must be comma-separated prompt tags or short prompt phrases.
+- positive_prompt and negative_prompt must be comma-separated prompt phrases.
 - Do not write prose sentences, explanations, bullet points, markdown fences, paragraphs, or quoted lists inside the JSON values.
 - Use English prompt terms only. Translate non-English user concepts into concise English tags.
-- Each tag should usually be 1 to 6 words.
+- positive_prompt should usually contain 8 to 16 cohesive phrases, not many isolated words.
+- Each positive phrase should usually be 3 to 9 words.
+- negative_prompt may use shorter concept tags, especially for excluded visual concepts.
 - positive_prompt must start with "Pixel Art".
+
+Motif cohesion:
+- The positive prompt is for a character motif, so group related visual ideas into phrase blocks.
+- Do not split modifiers away from the thing they describe.
+- Avoid atomized output such as "black, twisted, shadow creature, insectoid head".
+- Prefer cohesive output such as "black twisted shadow creature, toothless insectoid head with lower jaw".
+- Combine color, mood, species, body material, body shape, head design, and surface detail into readable motif phrases.
+- Keep the main subject identity as one strong early phrase.
+- Keep negative_prompt concise and clean; it does not need the same phrase grouping as positive_prompt.
 
 Semantic task:
 - Read the full user wording and decide which concepts are desired visual traits and which concepts are exclusions or rejections.
 - Use contextual language understanding, not a fixed keyword list. The same concept can be positive in one request and negative in another.
 - Internally identify visual concepts the user wants to appear.
 - Internally identify visual concepts the user says are absent, excluded, rejected, removed, or forbidden.
-- Write positive_prompt as tag phrases for the intended design.
+- Write positive_prompt as cohesive motif phrases for the intended design.
 - Write negative_prompt starting with every user-specific excluded or absent visual concept as plain concept tags, followed by generic bad-quality tags.
 - Put desired traits only in positive_prompt.
 - Put excluded, absent, forbidden, or rejected visual concepts in negative_prompt.
@@ -49,6 +60,7 @@ Semantic task:
 - Do not invent extra user-specific negative tags that the user did not exclude. Generic bad-quality tags are allowed after user-specific exclusions.
 - Do not invent replacement traits just to explain an exclusion. Only add a positive replacement when the user actually describes it.
 - Preserve the user's intended character identity, body shape, materials, surface details, mood, and revision request.
+- When the user describes a shadow/dark creature and excludes hard body structures, do not introduce plated, armored, or shell-like wording into positive_prompt. Prefer soft silhouette/material wording that follows from the user's description.
 
 Abstract rule example, not content to copy:
 - Input meaning: desired A, no B, without C.
