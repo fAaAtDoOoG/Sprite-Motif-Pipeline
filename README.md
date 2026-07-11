@@ -7,11 +7,13 @@
 ## 功能
 
 - 默认 prompt composer：用户输入一句简单描述，系统改写成适合像素角色母题的正负提示词。
-- 可选外部 LLM：支持 OpenAI-compatible API 或 Ollama；没有 LLM 时使用内置规则和示例集。
+- 可选外部 LLM：支持 OpenAI-compatible API 或 Ollama；没有 LLM 时使用通用的内置 fallback composer。
 - 直接 prompt 模式：用户可以绕过 prompt composer，把 prompt 直接送入 pipeline。
 - 批次生成：一次生成多张候选图，保存高分辨率、低分辨率、ComfyUI API prompt 和 manifest。
 - 选择与迭代：选择上一批中的候选图，并输入修改建议，系统改写 prompt 后生成下一批。
 - ComfyUI 原生后端：导出并提交 Qwen-Image-2512 + Pixel Art LoRA API workflow。
+- 可选图片后端：保留内置 Qwen-Image-2512，也可加载任意 ComfyUI API 格式的纯 txt2img 工作流，或连接 OpenAI-compatible Images API。
+- 可选模型：网页可直接填写本地模型标识、API 模型名、endpoint，以及仅在当前请求中使用的 API key。
 - 开源合规：项目代码使用 Apache-2.0；不打包、不再分发任何模型权重。
 
 ## 安装
@@ -49,12 +51,39 @@ uv run spritepipe-gui
 uv run spritepipe-web --port 7865
 ```
 
-网页 GUI 支持描述生成、直接 prompt、批量参数、候选预览、选择候选后反馈迭代，以及 ComfyUI 节点和模型文件校验。
-网页启动时会先尝试连接 `http://127.0.0.1:8188`，如果已有 ComfyUI 在运行就直接复用；如果没有运行，会按默认 `ComfyUI Folder` 自动启动本地 ComfyUI。Backend 区域里的 `Start ComfyUI` 仍可手动重试，支持常见的 `run_nvidia_gpu.bat`、portable `python_embeded` 和 `main.py` 方式；`Start Ollama` 可以显式启动本地 Ollama 服务。如果不想启动时自动检查 ComfyUI，可使用 `uv run spritepipe-web --no-auto-comfy`。
-默认 prompt model 会选择本地 Ollama 的 `qwen3:32b`，并在 Ollama 请求里默认使用 `num_gpu=999`、`num_ctx=4096`、`num_predict=256`，以便尽量让 32B prompt rewrite 走 GPU。网页中的 `Validate Prompt Model` 会检查 Ollama 服务和模型，缺少模型时可直接拉取；下载和生成过程都会显示进度条与日志。网页 GUI 在 `Provider = ollama` 时会在预览、生成和迭代前先校验 prompt model，避免误以为用了 LLM 但实际走了 fallback；如果想显式使用内置规则，把 `Provider` 改成 `none`。启用 prompt model 时，用户原始描述会交给 LLM 自行判断哪些内容属于正向需求、哪些属于 negative prompt；代码不会用固定中文关键词或词表替 LLM 硬拆。
-`Preview Prompt` 现在也会作为后台任务运行并更新顶部进度条，不会在等待本地 LLM 时看起来像没反应。默认情况下，pipeline 会给 Ollama prompt rewrite 请求发送 `keep_alive=0`，让 prompt model 用完后立即卸载；网页里也有 `Unload Prompt Model` 按钮可以手动释放。若你希望连续改 prompt 时更快、且机器内存足够，可以在启动 GUI 前设置 `$env:SPRITEPIPE_LLM_KEEP_ALIVE="5m"`。
+网页 GUI 支持描述生成、直接 prompt、批量参数、候选预览、选择候选后反馈迭代，以及 ComfyUI 节点和模型文件校验。默认使用 Qwen-Image-2512 + Pixel Art LoRA 的纯 txt2img 工作流；用户也可以选择自定义 ComfyUI 或 Images API 后端。选择候选只把其既有 prompt 作为 LLM 的迭代上下文，不会把图片传回生成模型。
+启动网页 GUI 本身不会启动 ComfyUI 或 Ollama。点击 `Generate` 或 `Iterate Selected` 后，pipeline 会先启动 Ollama，在一次请求中扩写并自检整批正负 prompt，然后关闭本次任务启动的 Ollama；内置 Qwen 或自定义 ComfyUI 后端随后才启动 ComfyUI，生成完毕后关闭本次任务启动的 ComfyUI。Images API 后端会跳过 ComfyUI，直接在 prompt 阶段之后发出 API 请求。`Preview Prompt` 只执行 Ollama 阶段。直接 prompt 模式跳过 Ollama。
+默认 prompt model 是本地 Ollama 的 `qwen3:32b`，请求默认使用 `num_gpu=999`、`num_ctx=4096`、`num_predict=1024`、`temperature=0.55`。Prompt LLM 不再只做逐字翻译：它会保留所有明确要求，自行判断 positive/negative，并对用户没有写明的轮廓、比例、形态节奏、特征布局、明暗组织和表面表现进行相容的推测。每个批次候选都会得到独立的一组 positive/negative prompt；默认批次为 4，因此会得到 4 个有实质差异的视觉方向，而不是只更换 seed。推测可以丰富角色，但不能与明确要求冲突或替换用户指定的身份。代码没有角色范例、固定中文关键词或针对某个角色的硬编码。
+`Validate Prompt Model` 会临时启动 Ollama 完成检查，然后自动退出本次启动的服务；缺少模型时可直接拉取。`Preview Prompt` 作为后台任务运行并更新顶部进度条。候选扩写与事实自检在同一次模型请求中完成，请求结束后立即卸载 prompt model。
+Backend 区域仍保留 `Start ComfyUI` 和 `Start Ollama` 作为手动诊断入口。为了不误杀用户的其他任务，pipeline 只终止自己启动的进程；如果检测到用户已经手动启动或由其他程序启动的服务，就复用该服务、在阶段结束时卸载相关模型，但保留外部服务进程。
 生成完成后，候选预览默认显示左右对照：左侧 high-res，右侧把 low-res 按 pixel-perfect 方式放大到 high-res 同尺寸；预览器支持鼠标滚轮缩放、左键拖动，以及移动/放大/缩小按钮。
 GUI 里的 `Models` 默认指向本机可发现的 ComfyUI `models` 文件夹。点击 `Validate ComfyUI` 后，如果缺少默认 safetensors，会询问是否自动下载到该文件夹。
+
+## 图片生成后端
+
+网页 `Backend` 区域提供三种后端：
+
+- `Built-in Qwen-Image-2512`：默认的 ComfyUI + Pixel Art LoRA 方案；Image model 填写 ComfyUI 中显示的 diffusion model 文件名。
+- `Custom ComfyUI workflow`：使用本地部署的其他 txt2img 模型，并由用户提供 ComfyUI API 格式 JSON。
+- `OpenAI-compatible Images API`：连接托管 API 或实现 [`POST /v1/images/generations`](https://developers.openai.com/api/reference/resources/images/methods/generate) 的本地服务；支持读取 `data[0].b64_json` 和 `data[0].url`。
+
+自定义 ComfyUI 工作流必须通过 ComfyUI 的 **Save (API Format)** 导出。把希望由 SpritePipe 注入的字段替换为以下占位符：
+
+`{{positive_prompt}}`、`{{negative_prompt}}`、`{{width}}`、`{{height}}`、`{{seed}}`、`{{steps}}`、`{{cfg}}`、`{{filename_prefix}}`、`{{model}}`、`{{lora_name}}`、`{{lora_strength}}`。
+
+占位符单独作为一个 JSON 字符串值时会保留数字类型，例如 `"seed": "{{seed}}"`；嵌入较长字符串时按文本替换。工作流需要自行包含模型加载、采样、解码和保存节点，并且必须保持纯 txt2img。生成前，pipeline 会校验该 JSON 需要的节点是否存在于当前 ComfyUI。
+
+网页中的图片 API key 和 prompt API key 只随当前请求进入内存，不会写入 manifest、导出的请求 JSON、日志或浏览器存储。CLI 推荐使用环境变量：
+
+```powershell
+$env:SPRITEPIPE_IMAGE_BACKEND="openai-images"
+$env:SPRITEPIPE_IMAGE_ENDPOINT="https://api.example.com/v1/images/generations"
+$env:SPRITEPIPE_IMAGE_API_KEY="..."
+$env:SPRITEPIPE_IMAGE_MODEL="your-image-model"
+spritepipe generate --description "森林法师，小个子，绿色斗篷"
+```
+
+标准 Images API 没有独立 negative prompt 字段，因此 pipeline 会把 negative 概念作为明确的 avoid 指令追加到请求 prompt。不同本地兼容服务支持的尺寸和参数可能不同；这里的 compatible 只表示它遵循上述 HTTP 请求与响应结构。
 
 旧版 Tk 桌面窗口仍然保留：
 
@@ -106,6 +135,12 @@ spritepipe workflow export --output workflows\qwen_image_2512_pixel_sprite_api.j
 spritepipe generate --description "冰系少女，蓝白配色" --dry-run
 ```
 
+使用自定义本地 ComfyUI 模型：
+
+```powershell
+spritepipe generate --description "森林法师" --image-backend custom-comfy --custom-workflow workflows\my_model_api.json --image-model my_model.safetensors
+```
+
 ## 外部 LLM Prompt Composer
 
 默认不依赖在线 LLM。若要用其他 LLM 改写 prompt，可配置环境变量。
@@ -127,33 +162,35 @@ $env:SPRITEPIPE_LLM_ENDPOINT="http://127.0.0.1:11434"
 $env:SPRITEPIPE_LLM_MODEL="qwen3:32b"
 $env:SPRITEPIPE_OLLAMA_NUM_GPU="999"
 $env:SPRITEPIPE_OLLAMA_NUM_CTX="4096"
-$env:SPRITEPIPE_OLLAMA_NUM_PREDICT="256"
+$env:SPRITEPIPE_OLLAMA_NUM_PREDICT="1024"
 ```
 
-默认 `SPRITEPIPE_LLM_KEEP_ALIVE="0"`，也就是每次 prompt rewrite 完成后释放 Ollama prompt model，降低内存占用。可以改成 `"5m"`、`"30m"` 或 `"-1"` 来保留热加载；这只影响 prompt LLM，不会卸载 ComfyUI 里的 Qwen-Image 主模型。
+默认 `SPRITEPIPE_LLM_KEEP_ALIVE="0"`。pipeline 自己启动 Ollama 时会在整个 prompt 阶段结束后关闭该服务；复用外部 Ollama 时则会卸载本次使用的 prompt model，但不会终止外部进程。
 默认 `SPRITEPIPE_LLM_TIMEOUT="900"`，适配 `qwen3:32b` 的冷启动；网页 Prompt Model 区域也可以直接修改 GPU layers、Context、Max tokens 和 Thinking。
 
-内置的 prompt curriculum 在 `src/sprite_motif_pipeline/prompt_training_examples.jsonl`。它既作为运行时 few-shot 示例，也可以作为后续微调 prompt LLM 的 starter 数据。
+Prompt LLM 不会注入角色范例或固定角色词表。它只接收当前描述、候选数量、已选候选的 prompt 和用户反馈，由 `qwen3:32b` 自行判断正向和负向概念，并为每张候选扩写一组不同但相容的 txt2img 视觉提示词。迭代时，每组都保留已选设计和未受反馈影响的特征，同时用不同方式揣测并实现修改建议。
 
 ## 输出结构
 
 每次生成会写入 `runs/run_YYYYMMDD_HHMMSS/`：
 
 - `manifest.json`：描述、用户原始输入历史、prompt、seed、选择和候选信息
-- `api_prompts/*.json`：每张候选的 ComfyUI API prompt
-- `highres/*.png`：ComfyUI 生成图
+- `api_prompts/*.json`：每张候选解析后的 ComfyUI prompt 或 Images API 请求，不包含密钥
+- `highres/*`：图片后端生成的高分辨率图
 - `lowres/*.png`：nearest-neighbor 低分辨率图
 - `contact_sheet.png`：低分辨率候选图对照表
 
 ## 模型与许可证说明
 
-本仓库只包含 pipeline 代码、prompt 示例、workflow 模板和文档，不包含模型权重。
+本仓库只包含 pipeline 代码、workflow 模板和文档，不包含模型权重。
 
 - Qwen-Image-2512：Qwen 团队发布，Apache-2.0。
 - Qwen-Image-2512 Pixel Art LoRA：`prithivMLmods/Qwen-Image-2512-Pixel-Art-LoRA`，Apache-2.0，触发词为 `Pixel Art`。
 - 本项目代码：Apache-2.0。
 
-用户需要自行下载模型，并遵守模型、LoRA、ComfyUI、LLM 服务和生成内容所在地的适用条款。
+用户需要自行下载模型，并在使用或再分发前以各自模型卡和许可证文本为准，遵守模型、LoRA、ComfyUI、LLM 服务和生成内容所在地的适用条款。
+
+自定义模型和外部 API 均由用户自行选择，本项目不对其背书、打包或重新授权。使用前请单独核验模型许可证、API 条款、商业使用限制、隐私规则和生成内容权利。
 
 ## Contributors
 

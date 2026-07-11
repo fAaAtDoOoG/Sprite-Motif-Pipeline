@@ -10,9 +10,10 @@ ComfyUI model folders:
 | `qwen_image_vae.safetensors` | `ComfyUI/models/vae/` |
 | `Qwen-Image-2512-Master-Pixel-Art-LoRA.safetensors` | `ComfyUI/models/loras/` |
 
-The default pipeline uses the FP8 Qwen-Image-2512 diffusion model for lower VRAM
-pressure. If you have enough VRAM, you can pass another ComfyUI model filename
-through the code defaults or by editing the generated API prompt JSON.
+The built-in/default workflow uses the FP8 Qwen-Image-2512 diffusion model plus
+the Pixel Art LoRA listed above. Automatic downloads use these exact filenames.
+You can enter another structurally compatible Qwen diffusion filename in the
+web GUI. Other architectures should use a custom ComfyUI API workflow instead.
 
 After placing files, start ComfyUI and run:
 
@@ -32,9 +33,30 @@ ComfyUI `models` folder, and `Validate ComfyUI` will offer to download missing
 default `.safetensors` files into the correct subfolders. These files can be
 large, so the GUI asks before downloading.
 
+## Other Image Models
+
+The web GUI has three image backends:
+
+1. `Built-in Qwen-Image-2512` uses the files above.
+2. `Custom ComfyUI workflow` uses any local txt2img model that has an API-format ComfyUI workflow.
+3. `OpenAI-compatible Images API` sends prompts to a hosted or local `/v1/images/generations` endpoint.
+
+For a custom ComfyUI workflow, export with **Save (API Format)** and replace
+controllable values with `{{positive_prompt}}`, `{{negative_prompt}}`,
+`{{width}}`, `{{height}}`, `{{seed}}`, `{{steps}}`, `{{cfg}}`,
+`{{filename_prefix}}`, `{{model}}`, `{{lora_name}}`, or `{{lora_strength}}`.
+Automatic model download is intentionally
+limited to the built-in Qwen assets; install custom model files according to
+their own model card and ComfyUI node documentation.
+
+For API backends, configure the model identifier, full endpoint, and API key in
+the browser, or use `SPRITEPIPE_IMAGE_MODEL`, `SPRITEPIPE_IMAGE_ENDPOINT`, and
+`SPRITEPIPE_IMAGE_API_KEY`. Browser-entered keys are transient and are excluded
+from run artifacts.
+
 ## Prompt Model
 
-The default prompt-rewriting model is local Ollama `qwen2.5:7b-instruct` at
+The default prompt-rewriting model is local Ollama `qwen3:32b` at
 `http://127.0.0.1:11434`.
 
 In the browser GUI, use `Validate Prompt Model` to check whether Ollama is
@@ -42,21 +64,20 @@ reachable and whether the selected model exists. If the model is missing, the UI
 can pull it with Ollama. The same download is available through `Download Prompt
 Model`.
 
-`Preview Prompt` runs through the same background job/progress bar system as
-generation. By default the project sends `keep_alive=0` to Ollama prompt-rewrite
-requests, which unloads the prompt model after use and lowers memory pressure.
-Use `Unload Prompt Model` in the browser GUI to explicitly free the selected
-Ollama prompt model. If you prefer keeping it warm for repeated edits, set:
+Launching the GUI does not start Ollama or ComfyUI. `Preview Prompt` temporarily
+starts only Ollama. Generation first completes that prompt phase and releases it,
+then temporarily starts ComfyUI for Qwen-Image-2512 generation. Processes started
+by the pipeline are stopped after their phase. A service that was already running
+is reused and left running, while the model used by the pipeline is unloaded.
 
-```powershell
-$env:SPRITEPIPE_LLM_KEEP_ALIVE="5m"
-```
-
-This setting only affects the prompt LLM. ComfyUI may still retain image model
-weights separately.
+The prompt request includes the generation batch size. `qwen3:32b` returns one
+distinct positive/negative prompt pair per candidate while preserving every
+explicit source fact and speculating only where the user left visual choices open.
+The default `num_predict` is `1024` so a four-candidate JSON response has enough
+output budget.
 
 You can also install it manually:
 
 ```powershell
-ollama pull qwen2.5:7b-instruct
+ollama pull qwen3:32b
 ```

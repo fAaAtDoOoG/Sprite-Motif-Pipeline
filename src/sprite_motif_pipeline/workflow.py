@@ -129,7 +129,7 @@ def build_api_prompt(
     return prompt
 
 
-def export_api_prompt(path: Path, prompt: Prompt) -> None:
+def export_api_prompt(path: Path, prompt: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(prompt, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 

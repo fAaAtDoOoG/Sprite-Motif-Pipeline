@@ -8,5 +8,7 @@ build/
 *.egg-info/
 runs/
 outputs/
+logs/
+data/reference_inputs/
 .env
 *.log

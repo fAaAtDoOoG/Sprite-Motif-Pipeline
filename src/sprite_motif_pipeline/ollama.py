@@ -5,14 +5,16 @@ import os
 import shutil
 import subprocess
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterator
 from urllib.parse import urlparse
 
 import requests
 
 from .model_assets import human_bytes
+from .processes import terminate_process_tree
 
 ProgressCallback = Callable[[str], None]
 
@@ -29,6 +31,13 @@ class OllamaValidation:
     version: str = ""
     models: tuple[str, ...] = ()
     message: str = ""
+
+
+@dataclass(frozen=True)
+class OllamaServerLease:
+    endpoint: str
+    process: subprocess.Popen[bytes] | None
+    started_by_pipeline: bool
 
 
 def normalize_ollama_endpoint(endpoint: str | None) -> str:
@@ -99,21 +108,34 @@ def validate_ollama_model(
 
 
 def start_ollama_server(endpoint: str, *, progress: ProgressCallback | None = None, timeout_s: int = 30) -> bool:
+    try:
+        start_ollama_server_managed(endpoint, progress=progress, timeout_s=timeout_s)
+    except RuntimeError as exc:
+        _emit(progress, str(exc))
+        return False
+    return True
+
+
+def start_ollama_server_managed(
+    endpoint: str,
+    *,
+    progress: ProgressCallback | None = None,
+    timeout_s: int = 30,
+) -> OllamaServerLease:
     endpoint = normalize_ollama_endpoint(endpoint)
     if ollama_version(endpoint):
-        return True
+        _emit(progress, "reusing an existing Ollama server")
+        return OllamaServerLease(endpoint=endpoint, process=None, started_by_pipeline=False)
     if not _is_local_endpoint(endpoint):
-        _emit(progress, f"cannot auto-start non-local Ollama endpoint: {endpoint}")
-        return False
+        raise RuntimeError(f"Cannot auto-start non-local Ollama endpoint: {endpoint}")
 
     executable = find_ollama_executable()
     if executable is None:
-        _emit(progress, "ollama executable not found")
-        return False
+        raise RuntimeError("Ollama executable was not found.")
 
     _emit(progress, f"starting Ollama server: {executable}")
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    subprocess.Popen(
+    process = subprocess.Popen(
         [str(executable), "serve"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -124,10 +146,49 @@ def start_ollama_server(endpoint: str, *, progress: ProgressCallback | None = No
     while time.monotonic() < deadline:
         if ollama_version(endpoint):
             _emit(progress, "Ollama server is running")
-            return True
+            return OllamaServerLease(endpoint=endpoint, process=process, started_by_pipeline=True)
+        exit_code = process.poll()
+        if exit_code is not None:
+            raise RuntimeError(f"Ollama exited early with code {exit_code}.")
         time.sleep(0.5)
-    _emit(progress, "Ollama server did not become ready in time")
-    return False
+    terminate_process_tree(process)
+    raise RuntimeError(f"Ollama was launched but did not become ready at {endpoint}.")
+
+
+def stop_ollama_server(
+    lease: OllamaServerLease,
+    *,
+    model: str = "",
+    progress: ProgressCallback | None = None,
+) -> str:
+    if lease.started_by_pipeline and lease.process is not None:
+        _emit(progress, "stopping pipeline-owned Ollama server")
+        terminate_process_tree(lease.process)
+        _emit(progress, "Ollama server stopped")
+        return "stopped"
+
+    if model.strip() and ollama_version(lease.endpoint):
+        try:
+            unload_ollama_model(lease.endpoint, model, progress=progress)
+        except requests.RequestException as exc:
+            _emit(progress, f"could not unload reused Ollama model: {exc}")
+    _emit(progress, "left the pre-existing Ollama server running")
+    return "reused"
+
+
+@contextmanager
+def temporary_ollama_server(
+    endpoint: str,
+    *,
+    model: str = "",
+    progress: ProgressCallback | None = None,
+    timeout_s: int = 30,
+) -> Iterator[OllamaServerLease]:
+    lease = start_ollama_server_managed(endpoint, progress=progress, timeout_s=timeout_s)
+    try:
+        yield lease
+    finally:
+        stop_ollama_server(lease, model=model, progress=progress)
 
 
 def ollama_version(endpoint: str) -> str:

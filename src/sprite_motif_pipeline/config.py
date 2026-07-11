@@ -6,12 +6,8 @@ from typing import Tuple
 Size = Tuple[int, int]
 
 DEFAULT_NEGATIVE_PROMPT = (
-    "photorealistic rendering, 3D render, anime key visual, painterly brush strokes, "
-    "soft airbrush, heavy antialiasing, blurry silhouette, muddy colors, noisy edges, "
-    "cropped body, multiple characters, duplicate limbs, malformed hands, deformed face, "
-    "dynamic action pose, weapon motion blur, complex scenery, readable text, logo, "
-    "watermark, signature, UI frame, large background props, tiny details that disappear "
-    "at 64x64"
+    "photorealistic rendering, 3D render, painterly rendering, blur, dynamic pose, "
+    "busy background, text, logo, watermark"
 )
 
 
@@ -34,12 +30,15 @@ class ModelDefaults:
 
 
 DEFAULTS = ModelDefaults()
+
+
 DEFAULT_HIGH_RES: Size = (1024, 1024)
 DEFAULT_LOW_RES: Size = (64, 64)
 DEFAULT_PROMPT_MODEL = "qwen3:32b"
 DEFAULT_PROMPT_MODEL_NUM_GPU = 999
 DEFAULT_PROMPT_MODEL_NUM_CTX = 4096
-DEFAULT_PROMPT_MODEL_NUM_PREDICT = 256
+DEFAULT_PROMPT_MODEL_NUM_PREDICT = 1024
+DEFAULT_PROMPT_MODEL_TEMPERATURE = 0.55
 DEFAULT_PROMPT_MODEL_THINK = False
 DEFAULT_PROMPT_MODEL_TIMEOUT = 900
 

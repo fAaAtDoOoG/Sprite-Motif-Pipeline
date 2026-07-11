@@ -7,6 +7,12 @@ cd /d "%~dp0"
 if "%SPRITEPIPE_HOST%"=="" set "SPRITEPIPE_HOST=127.0.0.1"
 if "%SPRITEPIPE_PORT%"=="" set "SPRITEPIPE_PORT=7865"
 if "%PYTHONUTF8%"=="" set "PYTHONUTF8=1"
+if "%PYTHONIOENCODING%"=="" set "PYTHONIOENCODING=utf-8"
+if "%PYTHONPATH%"=="" (
+  set "PYTHONPATH=%CD%\src"
+) else (
+  set "PYTHONPATH=%CD%\src;%PYTHONPATH%"
+)
 
 where uv >nul 2>nul
 if errorlevel 1 (
@@ -30,7 +36,7 @@ echo URL: http://%SPRITEPIPE_HOST%:%SPRITEPIPE_PORT%/
 echo Press Ctrl+C in this window to stop the server.
 echo.
 
-uv run --with-editable . spritepipe-gui --host "%SPRITEPIPE_HOST%" --port "%SPRITEPIPE_PORT%"
+uv run --no-sync python -m sprite_motif_pipeline.web_gui --host "%SPRITEPIPE_HOST%" --port "%SPRITEPIPE_PORT%"
 set "EXIT_CODE=%ERRORLEVEL%"
 
 echo.

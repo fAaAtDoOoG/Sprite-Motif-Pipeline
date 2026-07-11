@@ -5,14 +5,16 @@ import subprocess
 import sys
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 from urllib.parse import urlencode, urlparse
 
 import requests
 
 from .config import DEFAULTS, ModelDefaults
+from .processes import terminate_process_tree
 
 ProgressCallback = Callable[[str], None]
 DEFAULT_COMFY_URL = "http://127.0.0.1:8188"
@@ -28,6 +30,15 @@ class ComfyLaunchPlan:
     cwd: Path
     root: Path
     label: str
+
+
+@dataclass(frozen=True)
+class ComfyServerLease:
+    base_url: str
+    process: subprocess.Popen[bytes] | None
+    started_by_pipeline: bool
+    comfy_dir: str = ""
+    log_path: str = ""
 
 
 class ComfyClient:
@@ -55,6 +66,15 @@ class ComfyClient:
         if not prompt_id:
             raise ComfyError(f"ComfyUI response did not include prompt_id: {data}")
         return str(prompt_id)
+
+    def free_memory(self, *, unload_models: bool = True, free_memory: bool = True) -> None:
+        """Ask ComfyUI to release image-model memory before a GPU prompt-model pass."""
+        response = requests.post(
+            f"{self.base_url}/free",
+            json={"unload_models": unload_models, "free_memory": free_memory},
+            timeout=self.timeout_s,
+        )
+        response.raise_for_status()
 
     def wait_for_history(self, prompt_id: str, timeout_s: int = 900, poll_s: float = 2.0) -> dict[str, Any]:
         deadline = time.monotonic() + timeout_s
@@ -150,9 +170,38 @@ def start_comfyui_server(
     progress: ProgressCallback | None = None,
     timeout_s: int = 180,
 ) -> dict[str, str]:
+    lease = start_comfyui_server_managed(
+        base_url,
+        comfy_dir=comfy_dir,
+        models_root=models_root,
+        progress=progress,
+        timeout_s=timeout_s,
+    )
+    status = "started" if lease.started_by_pipeline else "ready"
+    message = "ComfyUI is running." if lease.started_by_pipeline else "ComfyUI is already running."
+    result = {"status": status, "message": message, "comfy_dir": lease.comfy_dir}
+    if lease.log_path:
+        result["log_path"] = lease.log_path
+    return result
+
+
+def start_comfyui_server_managed(
+    base_url: str = DEFAULT_COMFY_URL,
+    *,
+    comfy_dir: str | Path = "",
+    models_root: str | Path = "",
+    progress: ProgressCallback | None = None,
+    timeout_s: int = 180,
+) -> ComfyServerLease:
     base_url = (base_url or DEFAULT_COMFY_URL).rstrip("/")
     if comfyui_is_ready(base_url):
-        return {"status": "ready", "message": "ComfyUI is already running.", "comfy_dir": str(comfy_dir or "")}
+        _emit(progress, "reusing an existing ComfyUI server")
+        return ComfyServerLease(
+            base_url=base_url,
+            process=None,
+            started_by_pipeline=False,
+            comfy_dir=str(comfy_dir or ""),
+        )
 
     if not _is_local_endpoint(base_url):
         raise RuntimeError(f"Cannot auto-start non-local ComfyUI endpoint: {base_url}")
@@ -181,12 +230,13 @@ def start_comfyui_server(
     while time.monotonic() < deadline:
         if comfyui_is_ready(base_url):
             _emit(progress, "ComfyUI is running")
-            return {
-                "status": "started",
-                "message": "ComfyUI is running.",
-                "comfy_dir": str(plan.root),
-                "log_path": str(log_path),
-            }
+            return ComfyServerLease(
+                base_url=base_url,
+                process=process,
+                started_by_pipeline=True,
+                comfy_dir=str(plan.root),
+                log_path=str(log_path),
+            )
         exit_code = process.poll()
         if exit_code is not None:
             log_tail = _tail_text(log_path)
@@ -195,7 +245,47 @@ def start_comfyui_server(
         time.sleep(2)
         _emit(progress, "waiting for ComfyUI")
 
+    terminate_process_tree(process)
     raise RuntimeError(f"ComfyUI was launched but is not reachable at {base_url}. Check {log_path}.")
+
+
+def stop_comfyui_server(lease: ComfyServerLease, *, progress: ProgressCallback | None = None) -> str:
+    if lease.started_by_pipeline and lease.process is not None:
+        _emit(progress, "stopping pipeline-owned ComfyUI server")
+        terminate_process_tree(lease.process)
+        _emit(progress, "ComfyUI server stopped")
+        return "stopped"
+
+    if comfyui_is_ready(lease.base_url):
+        try:
+            ComfyClient(lease.base_url, timeout_s=15).free_memory()
+            _emit(progress, "released models from the pre-existing ComfyUI server")
+        except requests.RequestException as exc:
+            _emit(progress, f"could not release reused ComfyUI models: {exc}")
+    _emit(progress, "left the pre-existing ComfyUI server running")
+    return "reused"
+
+
+@contextmanager
+def temporary_comfyui_server(
+    base_url: str = DEFAULT_COMFY_URL,
+    *,
+    comfy_dir: str | Path = "",
+    models_root: str | Path = "",
+    progress: ProgressCallback | None = None,
+    timeout_s: int = 180,
+) -> Iterator[ComfyServerLease]:
+    lease = start_comfyui_server_managed(
+        base_url,
+        comfy_dir=comfy_dir,
+        models_root=models_root,
+        progress=progress,
+        timeout_s=timeout_s,
+    )
+    try:
+        yield lease
+    finally:
+        stop_comfyui_server(lease, progress=progress)
 
 
 def comfyui_is_ready(base_url: str = DEFAULT_COMFY_URL) -> bool:
@@ -328,5 +418,15 @@ def _tail_text(path: Path, max_chars: int = 2000) -> str:
 
 
 def _emit(progress: ProgressCallback | None, message: str) -> None:
-    if progress is not None:
+    if progress is None:
+        return
+    try:
         progress(message)
+    except UnicodeEncodeError:
+        safe_message = message.encode("ascii", errors="backslashreplace").decode("ascii")
+        try:
+            progress(safe_message)
+        except Exception:  # noqa: BLE001 - progress reporting must not break process ownership.
+            return
+    except Exception:  # noqa: BLE001 - progress reporting must not break process ownership.
+        return

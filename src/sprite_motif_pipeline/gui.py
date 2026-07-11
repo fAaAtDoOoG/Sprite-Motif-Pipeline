@@ -13,7 +13,7 @@ from typing import Any
 
 from PIL import Image, ImageTk
 
-from .comfy import ComfyClient, start_comfyui_server, validate_model_assets, validate_required_nodes
+from .comfy import ComfyClient, temporary_comfyui_server, validate_model_assets, validate_required_nodes
 from .config import (
     DEFAULT_HIGH_RES,
     DEFAULT_LOW_RES,
@@ -27,9 +27,9 @@ from .config import (
     parse_size,
 )
 from .model_assets import assets_for_filenames, default_models_root, download_assets, missing_local_assets
-from .ollama import DEFAULT_OLLAMA_ENDPOINT, OllamaValidation, pull_ollama_model, validate_ollama_model
+from .ollama import DEFAULT_OLLAMA_ENDPOINT, OllamaValidation, pull_ollama_model, temporary_ollama_server, validate_ollama_model
 from .progress import generation_percent, percent_from_message, short_status
-from .prompting import LLMConfig, compose_prompt
+from .prompting import LLMConfig, PromptSpec, compose_prompt_batch
 from .runner import GenerationOptions, generate_batch
 from .session import Candidate, RunManifest, load_manifest, make_user_input, save_manifest, user_input_history
 from .workflow import required_node_types
@@ -113,7 +113,6 @@ class SpritePipeApp:
         self._init_vars()
         self._build_ui()
         self._poll_events()
-        self.root.after(300, self.auto_start_comfy)
 
     def _init_vars(self) -> None:
         self.comfy_url_var = tk.StringVar(value="http://127.0.0.1:8188")
@@ -336,28 +335,6 @@ class SpritePipeApp:
 
         self._run_worker("Validating", work, self._handle_validation_result)
 
-    def auto_start_comfy(self) -> None:
-        url = self.comfy_url_var.get().strip()
-        models_root = Path(self.models_root_var.get().strip() or default_models_root())
-
-        def work() -> dict[str, str]:
-            try:
-                return start_comfyui_server(
-                    url,
-                    models_root=models_root,
-                    progress=lambda message: self.events.put(("log", message)),
-                )
-            except FileNotFoundError as exc:
-                return {
-                    "status": "not_found",
-                    "message": f"ComfyUI folder was not found. Set Models or SPRITEPIPE_COMFY_DIR, then validate/start manually. {exc}",
-                }
-
-        def done(result: dict[str, str]) -> None:
-            self._log(result.get("message") or result.get("status") or "ComfyUI startup check complete.")
-
-        self._run_worker("Starting ComfyUI", work, done)
-
     def _handle_validation_result(self, result: dict[str, Any]) -> None:
         status = result["status"]
         if status == "missing_nodes":
@@ -392,16 +369,41 @@ class SpritePipeApp:
 
     def preview_prompt(self) -> None:
         try:
-            spec = self._compose_from_ui()
+            mode, text, llm_config, options = self._collect_payload()
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("Prompt", str(exc))
             return
+
+        def work():
+            return self._compose_with_temporary_prompt_service(
+                llm_config,
+                lambda: compose_prompt_batch(
+                    text if mode == "description" else None,
+                    candidate_count=options.batch_size,
+                    direct_prompt=text if mode == "prompt" else None,
+                    force_pixel_trigger=True,
+                    llm_config=llm_config,
+                ),
+                enabled=mode == "description",
+            )
+
+        self._run_worker("Previewing prompt", work, self._show_prompt_specs)
+
+    def _show_prompt_specs(self, specs: list[PromptSpec]) -> None:
         self.prompt_text.delete("1.0", tk.END)
-        self.prompt_text.insert(tk.END, spec.positive_prompt)
-        self.prompt_text.insert(tk.END, "\n\nNegative:\n")
-        self.prompt_text.insert(tk.END, spec.negative_prompt)
-        if spec.notes:
-            self._log(spec.notes)
+        self.prompt_text.insert(tk.END, self._format_prompt_specs(specs))
+        for spec in specs:
+            if spec.notes:
+                self._log(spec.notes)
+
+    @staticmethod
+    def _format_prompt_specs(specs: list[PromptSpec]) -> str:
+        if len(specs) == 1:
+            return f"{specs[0].positive_prompt}\n\nNegative:\n{specs[0].negative_prompt}"
+        return "\n\n".join(
+            f"Candidate {index}\nPositive:\n{spec.positive_prompt}\n\nNegative:\n{spec.negative_prompt}"
+            for index, spec in enumerate(specs, start=1)
+        )
 
     def generate(self) -> None:
         try:
@@ -411,20 +413,28 @@ class SpritePipeApp:
             return
 
         def work() -> Path:
-            spec = compose_prompt(
-                text if mode == "description" else None,
-                direct_prompt=text if mode == "prompt" else None,
-                force_pixel_trigger=True,
-                llm_config=llm_config,
+            specs = self._compose_with_temporary_prompt_service(
+                llm_config,
+                lambda: compose_prompt_batch(
+                    text if mode == "description" else None,
+                    candidate_count=options.batch_size,
+                    direct_prompt=text if mode == "prompt" else None,
+                    force_pixel_trigger=True,
+                    llm_config=llm_config,
+                ),
+                enabled=mode == "description",
             )
-            self.events.put(("prompt", spec.positive_prompt))
-            return generate_batch(
-                spec,
-                description=text,
-                options=options,
-                user_input_kind="direct_prompt" if mode == "prompt" else "description",
-                user_input_text=text,
-                progress=lambda message: self._queue_generation_progress(message, options.batch_size),
+            self.events.put(("prompt", self._format_prompt_specs(specs)))
+            return self._generate_with_temporary_comfy_service(
+                options,
+                lambda: generate_batch(
+                    specs,
+                    description=text,
+                    options=options,
+                    user_input_kind="direct_prompt" if mode == "prompt" else "description",
+                    user_input_text=text,
+                    progress=lambda message: self._queue_generation_progress(message, options.batch_size),
+                ),
             )
 
         self._run_worker("Generating", work, self.load_run, determinate=True)
@@ -454,23 +464,30 @@ class SpritePipeApp:
         feedback_input = make_user_input("feedback", feedback, selected_index=candidate.index)
 
         def work() -> Path:
-            spec = compose_prompt(
-                previous_manifest.description,
-                feedback=feedback,
-                previous_prompt=candidate.positive_prompt,
-                previous_negative_prompt=candidate.negative_prompt,
-                llm_config=llm_config,
+            specs = self._compose_with_temporary_prompt_service(
+                llm_config,
+                lambda: compose_prompt_batch(
+                    previous_manifest.description,
+                    candidate_count=options.batch_size,
+                    feedback=feedback,
+                    previous_prompt=candidate.positive_prompt,
+                    previous_negative_prompt=candidate.negative_prompt,
+                    llm_config=llm_config,
+                ),
             )
-            self.events.put(("prompt", spec.positive_prompt))
-            run_dir = generate_batch(
-                spec,
-                description=previous_manifest.description,
-                options=options,
-                parent_run=str(previous_run),
-                selected_index=candidate.index,
-                feedback=feedback,
-                user_inputs=[*history, feedback_input],
-                progress=lambda message: self._queue_generation_progress(message, options.batch_size),
+            self.events.put(("prompt", self._format_prompt_specs(specs)))
+            run_dir = self._generate_with_temporary_comfy_service(
+                options,
+                lambda: generate_batch(
+                    specs,
+                    description=previous_manifest.description,
+                    options=options,
+                    parent_run=str(previous_run),
+                    selected_index=candidate.index,
+                    feedback=feedback,
+                    user_inputs=[*history, feedback_input],
+                    progress=lambda message: self._queue_generation_progress(message, options.batch_size),
+                ),
             )
             previous_manifest.selected_index = candidate.index
             previous_manifest.feedback = feedback
@@ -694,14 +711,37 @@ class SpritePipeApp:
             think=bool(self.llm_think_var.get()),
         )
 
-    def _compose_from_ui(self):
-        mode, text, llm_config, _options = self._collect_payload()
-        return compose_prompt(
-            text if mode == "description" else None,
-            direct_prompt=text if mode == "prompt" else None,
-            force_pixel_trigger=True,
-            llm_config=llm_config,
-        )
+    def _compose_with_temporary_prompt_service(self, config: LLMConfig, work, *, enabled: bool = True):
+        if not enabled or config.provider != "ollama":
+            return work()
+        report = lambda message: self.events.put(("log", message))
+        with temporary_ollama_server(config.endpoint, model=config.model, progress=report):
+            validation = validate_ollama_model(config.endpoint, config.model, auto_start=False)
+            if not validation.model_present:
+                raise RuntimeError(f"Prompt model '{config.model}' is not installed in Ollama.")
+            return work()
+
+    def _generate_with_temporary_comfy_service(self, options: GenerationOptions, work):
+        if options.dry_run:
+            return work()
+        report = lambda message: self.events.put(("log", message))
+        models_root = Path(self.models_root_var.get().strip() or default_models_root())
+        with temporary_comfyui_server(
+            options.comfy_url,
+            models_root=models_root,
+            progress=report,
+            timeout_s=max(180, options.timeout),
+        ):
+            client = ComfyClient(options.comfy_url)
+            missing_nodes = validate_required_nodes(client, required_node_types())
+            if missing_nodes:
+                raise RuntimeError(f"ComfyUI is missing required Qwen workflow nodes: {', '.join(missing_nodes)}")
+            missing_assets = validate_model_assets(client)
+            if missing_assets:
+                raise RuntimeError(
+                    "ComfyUI is missing required Qwen-Image-2512 model files: " + ", ".join(missing_assets.values())
+                )
+            return work()
 
     def _run_worker(self, label: str, work, on_done, *, determinate: bool = False) -> None:
         if self.worker_active:

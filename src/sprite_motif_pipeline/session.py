@@ -38,6 +38,9 @@ class RunManifest:
     prompt_notes: str
     high_res: str
     low_res: str
+    image_backend: str = "qwen-comfy"
+    image_model: str = ""
+    image_endpoint: str = ""
     parent_run: str = ""
     selected_index: int | None = None
     feedback: str = ""
@@ -70,7 +73,8 @@ def load_manifest(run_dir: Path) -> RunManifest:
     data: dict[str, Any] = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
     candidates = [_from_dict(Candidate, candidate) for candidate in data.pop("candidates", [])]
     user_inputs = [_from_dict(UserInput, user_input) for user_input in data.pop("user_inputs", [])]
-    return RunManifest(**data, candidates=candidates, user_inputs=user_inputs)
+    allowed = {field.name for field in fields(RunManifest)}
+    return RunManifest(**{key: value for key, value in data.items() if key in allowed}, candidates=candidates, user_inputs=user_inputs)
 
 
 def make_user_input(kind: str, text: str, selected_index: int | None = None) -> UserInput:
@@ -101,6 +105,9 @@ def create_manifest(
     user_input_kind: str = "description",
     user_input_text: str | None = None,
     user_inputs: list[UserInput] | None = None,
+    image_backend: str = "qwen-comfy",
+    image_model: str = "",
+    image_endpoint: str = "",
 ) -> RunManifest:
     history = list(user_inputs or [])
     if not history:
@@ -114,6 +121,9 @@ def create_manifest(
         prompt_notes=prompt_spec.notes,
         high_res=format_size(high_res),
         low_res=format_size(low_res),
+        image_backend=image_backend,
+        image_model=image_model,
+        image_endpoint=image_endpoint,
         parent_run=parent_run,
         feedback=feedback,
         user_inputs=history,

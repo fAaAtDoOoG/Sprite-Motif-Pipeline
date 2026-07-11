@@ -32,5 +32,5 @@ spritepipe-tk = "sprite_motif_pipeline.gui:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
-[tool.setuptools.package-data]
-sprite_motif_pipeline = ["prompt_training_examples.jsonl"]
+[tool.pytest.ini_options]
+pythonpath = ["src"]

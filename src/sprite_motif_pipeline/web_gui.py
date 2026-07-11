@@ -9,14 +9,22 @@ import sys
 import threading
 import time
 import webbrowser
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, TypeVar
 from urllib.parse import parse_qs, urlencode, urlparse
 
-from .comfy import DEFAULT_COMFY_URL, ComfyClient, default_comfy_dir, start_comfyui_server, validate_model_assets, validate_required_nodes
+from .comfy import (
+    DEFAULT_COMFY_URL,
+    ComfyClient,
+    default_comfy_dir,
+    start_comfyui_server,
+    temporary_comfyui_server,
+    validate_model_assets,
+    validate_required_nodes,
+)
 from .config import (
     DEFAULT_HIGH_RES,
     DEFAULT_LOW_RES,
@@ -29,13 +37,33 @@ from .config import (
     format_size,
     parse_size,
 )
+from .image_backends import (
+    DEFAULT_OPENAI_IMAGE_MODEL,
+    DEFAULT_OPENAI_IMAGES_ENDPOINT,
+    IMAGE_BACKEND_CUSTOM_COMFY,
+    IMAGE_BACKEND_OPENAI,
+    IMAGE_BACKEND_QWEN,
+    custom_workflow_node_types,
+    load_custom_workflow,
+    normalize_image_backend,
+)
 from .model_assets import assets_for_filenames, default_models_root, download_assets, missing_local_assets
-from .ollama import DEFAULT_OLLAMA_ENDPOINT, pull_ollama_model, start_ollama_server, unload_ollama_model, validate_ollama_model
+from .ollama import (
+    DEFAULT_OLLAMA_ENDPOINT,
+    pull_ollama_model,
+    start_ollama_server,
+    temporary_ollama_server,
+    unload_ollama_model,
+    validate_ollama_model,
+)
 from .progress import generation_percent, percent_from_message, short_status
-from .prompting import LLMConfig, PromptSpec, compose_prompt
+from .prompting import LLMConfig, PromptSpec, compose_prompt_batch
 from .runner import GenerationOptions, generate_batch
 from .session import Candidate, load_manifest, make_user_input, save_manifest, user_input_history
 from .workflow import required_node_types
+
+
+T = TypeVar("T")
 
 
 @dataclass
@@ -168,7 +196,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=7865)
     parser.add_argument("--no-browser", action="store_true")
-    parser.add_argument("--no-auto-comfy", action="store_true", help="Do not try to auto-start local ComfyUI when the web app starts.")
+    parser.add_argument("--no-auto-comfy", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--auto-shutdown-after", type=int, default=20, help="Seconds without browser heartbeat before auto-stopping the local web server.")
     args = parser.parse_args(argv)
 
@@ -176,8 +204,6 @@ def main(argv: list[str] | None = None) -> int:
     server = ThreadingHTTPServer((args.host, args.port), make_handler(state))
     state.attach_server(server)
     state.start_auto_shutdown_monitor()
-    if not args.no_auto_comfy:
-        schedule_auto_start_comfy(state)
     url = f"http://{args.host}:{args.port}/"
     print(f"Sprite Motif web GUI: {url}")
     if not args.no_browser:
@@ -312,8 +338,14 @@ def default_payload() -> dict[str, Any]:
         "comfy_dir": str(default_comfy_dir(models_root)),
         "models_root": str(models_root),
         "output_dir": "runs",
+        "image_backend": IMAGE_BACKEND_QWEN,
+        "image_model": DEFAULTS.diffusion_model,
+        "image_endpoint": DEFAULT_OPENAI_IMAGES_ENDPOINT,
+        "image_api_key": "",
+        "custom_workflow": "",
+        "openai_image_model": DEFAULT_OPENAI_IMAGE_MODEL,
         "mode": "description",
-        "description": "red-haired woman knight, light armor, brave personality",
+        "description": "",
         "batch_size": 4,
         "high_res": format_size(DEFAULT_HIGH_RES),
         "low_res": format_size(DEFAULT_LOW_RES),
@@ -327,6 +359,7 @@ def default_payload() -> dict[str, Any]:
         "llm_provider": "ollama",
         "llm_model": DEFAULT_PROMPT_MODEL,
         "llm_endpoint": DEFAULT_OLLAMA_ENDPOINT,
+        "llm_api_key": "",
         "llm_num_gpu": DEFAULT_PROMPT_MODEL_NUM_GPU,
         "llm_num_ctx": DEFAULT_PROMPT_MODEL_NUM_CTX,
         "llm_num_predict": DEFAULT_PROMPT_MODEL_NUM_PREDICT,
@@ -335,12 +368,24 @@ def default_payload() -> dict[str, Any]:
 
 
 def validate_comfy_response(payload: dict[str, Any]) -> dict[str, Any]:
+    options = generation_options_from_payload(payload)
+    if options.image_backend == IMAGE_BACKEND_OPENAI:
+        return {"status": "not_required", "message": "The selected Images API backend does not use ComfyUI."}
+
     client = ComfyClient(str(payload.get("comfy_url") or DEFAULT_COMFY_URL))
+    if options.image_backend == IMAGE_BACKEND_CUSTOM_COMFY:
+        template = load_custom_workflow(options.custom_workflow)
+        missing_nodes = validate_required_nodes(client, custom_workflow_node_types(template))
+        if missing_nodes:
+            return {"status": "missing_nodes", "missing_nodes": missing_nodes}
+        return {"status": "ready", "backend": options.image_backend}
+
     missing_nodes = validate_required_nodes(client, required_node_types())
     if missing_nodes:
         return {"status": "missing_nodes", "missing_nodes": missing_nodes}
 
-    missing_assets = validate_model_assets(client)
+    defaults = replace(DEFAULTS, diffusion_model=options.image_model or DEFAULTS.diffusion_model)
+    missing_assets = validate_model_assets(client, defaults)
     if not missing_assets:
         return {"status": "ready"}
 
@@ -356,6 +401,8 @@ def validate_comfy_response(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def start_comfy_job(payload: dict[str, Any], progress: Callable[[str, int | None], None]) -> dict[str, Any]:
+    if normalize_image_backend(str(payload.get("image_backend") or IMAGE_BACKEND_QWEN)) == IMAGE_BACKEND_OPENAI:
+        raise ValueError("The selected Images API backend does not use ComfyUI.")
     result = start_comfyui_server(
         str(payload.get("comfy_url") or DEFAULT_COMFY_URL),
         comfy_dir=str(payload.get("comfy_dir") or ""),
@@ -365,31 +412,9 @@ def start_comfy_job(payload: dict[str, Any], progress: Callable[[str, int | None
     return {"kind": "comfy_start", **result}
 
 
-def schedule_auto_start_comfy(state: WebAppState) -> dict[str, Any] | None:
-    try:
-        return state.start("Starting ComfyUI", auto_start_comfy_job)
-    except RuntimeError:
-        return None
-
-
-def auto_start_comfy_job(progress: Callable[[str, int | None], None]) -> dict[str, Any]:
-    payload = default_payload()
-    progress(f"checking ComfyUI at {payload['comfy_url']}", 5)
-    try:
-        result = start_comfy_job(payload, progress)
-    except FileNotFoundError as exc:
-        message = f"ComfyUI folder was not found. Set ComfyUI Folder or SPRITEPIPE_COMFY_DIR, then use Start ComfyUI. {exc}"
-        progress(message, 100)
-        return {"kind": "comfy_start", "auto": True, "status": "not_found", "message": message}
-
-    if result.get("status") == "ready":
-        progress("ComfyUI is already running", 100)
-    elif result.get("status") == "started":
-        progress("ComfyUI auto-started", 100)
-    return {"auto": True, **result}
-
-
 def download_models_job(payload: dict[str, Any], progress: Callable[[str, int | None], None]) -> dict[str, Any]:
+    if normalize_image_backend(str(payload.get("image_backend") or IMAGE_BACKEND_QWEN)) != IMAGE_BACKEND_QWEN:
+        raise ValueError("Automatic model download is only available for the built-in Qwen-Image-2512 backend.")
     models_root = Path(str(payload.get("models_root") or default_models_root()))
     filenames = [str(name) for name in payload.get("filenames", []) if str(name).strip()]
     assets = assets_for_filenames(filenames) if filenames else missing_local_assets(models_root)
@@ -401,7 +426,11 @@ def validate_llm_response(payload: dict[str, Any]) -> dict[str, Any]:
     config = llm_config_from_payload(payload)
     if config.provider != "ollama":
         return {"status": "unsupported", "message": "Automatic local model validation is available for Ollama providers."}
-    result = validate_ollama_model(config.endpoint, config.model)
+    try:
+        with temporary_ollama_server(config.endpoint, model=config.model):
+            result = validate_ollama_model(config.endpoint, config.model, auto_start=False)
+    except RuntimeError:
+        result = validate_ollama_model(config.endpoint, config.model, auto_start=False)
     return {"status": "ready" if result.model_present else "missing_model" if result.server_available else "server_unavailable", "result": asdict(result)}
 
 
@@ -419,7 +448,9 @@ def download_llm_job(payload: dict[str, Any], progress: Callable[[str, int | Non
     config = llm_config_from_payload(payload)
     if config.provider != "ollama":
         raise ValueError("Automatic local model download is available for Ollama providers.")
-    model = pull_ollama_model(config.endpoint, config.model, progress=lambda message: progress(message, percent_from_message(message)))
+    report = lambda message: progress(message, percent_from_message(message))
+    with temporary_ollama_server(config.endpoint, model=config.model, progress=report):
+        model = pull_ollama_model(config.endpoint, config.model, progress=report)
     return {"kind": "llm_download", "model": model}
 
 
@@ -432,7 +463,7 @@ def unload_llm_job(payload: dict[str, Any], progress: Callable[[str, int | None]
 
 
 def prompt_response(payload: dict[str, Any]) -> dict[str, Any]:
-    spec = compose_from_payload(payload)
+    spec = compose_with_temporary_prompt_service(payload, lambda _message, _percent=None: None)
     return {
         "positive_prompt": spec.positive_prompt,
         "negative_prompt": spec.negative_prompt,
@@ -442,34 +473,43 @@ def prompt_response(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def preview_prompt_job(payload: dict[str, Any], state: WebAppState, progress: Callable[[str, int | None], None]) -> dict[str, Any]:
-    progress("Rewriting prompt with prompt model", 10)
-    spec = compose_from_payload(payload)
-    state.set_prompt(format_prompt_preview(spec))
+    specs = compose_batch_with_temporary_prompt_service(payload, progress)
+    preview = format_prompt_previews(specs)
+    state.set_prompt(preview)
     progress("Prompt preview ready", 95)
+    first = specs[0]
     return {
         "kind": "prompt",
-        "positive_prompt": spec.positive_prompt,
-        "negative_prompt": spec.negative_prompt,
-        "source": spec.source,
-        "notes": spec.notes,
+        "positive_prompt": first.positive_prompt,
+        "negative_prompt": first.negative_prompt,
+        "source": first.source,
+        "notes": first.notes,
+        "preview_text": preview,
+        "candidates": [asdict(spec) for spec in specs],
     }
 
 
 def generate_job(payload: dict[str, Any], state: WebAppState, progress: Callable[[str, int | None], None]) -> dict[str, Any]:
-    spec = compose_from_payload(payload)
-    state.set_prompt(format_prompt_preview(spec))
     options = generation_options_from_payload(payload)
+    specs = compose_batch_with_temporary_prompt_service(payload, progress, candidate_count=options.batch_size)
+    progress("Prompt ready; Ollama phase complete", 25)
+    state.set_prompt(format_prompt_previews(specs))
     mode = str(payload.get("mode") or "description")
     text = str(payload.get("description") or payload.get("text") or "")
     description = text if mode == "description" else str(payload.get("prompt") or text)
     input_kind = "direct_prompt" if mode == "prompt" else "description"
-    run_dir = generate_batch(
-        spec,
-        description=description,
-        options=options,
-        user_input_kind=input_kind,
-        user_input_text=description,
-        progress=lambda message: progress(message, generation_percent(message, options.batch_size)),
+    run_dir = generate_with_temporary_comfy_service(
+        payload,
+        options,
+        progress,
+        lambda: generate_batch(
+            specs,
+            description=description,
+            options=options,
+            user_input_kind=input_kind,
+            user_input_text=description,
+            progress=lambda message: progress(message, generation_job_percent(message, options.batch_size)),
+        ),
     )
     return {"kind": "run", "run": run_response(run_dir)}
 
@@ -484,27 +524,39 @@ def iterate_job(payload: dict[str, Any], state: WebAppState, progress: Callable[
         raise ValueError("Feedback is empty.")
     history = user_input_history(manifest)
     feedback_input = make_user_input("feedback", feedback, selected_index=candidate.index)
+    options = generation_options_from_payload(payload)
 
     config = llm_config_from_payload(payload)
-    spec = compose_prompt(
-        manifest.description,
-        feedback=feedback,
-        previous_prompt=candidate.positive_prompt,
-        previous_negative_prompt=candidate.negative_prompt,
-        llm_config=config,
-        allow_fallback=config.provider in {"", "none"},
+    specs = run_with_temporary_prompt_service(
+        payload,
+        config,
+        progress,
+        lambda: compose_prompt_batch(
+            manifest.description,
+            candidate_count=options.batch_size,
+            feedback=feedback,
+            previous_prompt=candidate.positive_prompt,
+            previous_negative_prompt=candidate.negative_prompt,
+            llm_config=config,
+            allow_fallback=config.provider in {"", "none"},
+        ),
     )
-    state.set_prompt(format_prompt_preview(spec))
-    options = generation_options_from_payload(payload)
-    new_run_dir = generate_batch(
-        spec,
-        description=manifest.description,
-        options=options,
-        parent_run=str(run_dir),
-        selected_index=candidate.index,
-        feedback=feedback,
-        user_inputs=[*history, feedback_input],
-        progress=lambda message: progress(message, generation_percent(message, options.batch_size)),
+    progress("Prompt ready; Ollama phase complete", 25)
+    state.set_prompt(format_prompt_previews(specs))
+    new_run_dir = generate_with_temporary_comfy_service(
+        payload,
+        options,
+        progress,
+        lambda: generate_batch(
+            specs,
+            description=manifest.description,
+            options=options,
+            parent_run=str(run_dir),
+            selected_index=candidate.index,
+            feedback=feedback,
+            user_inputs=[*history, feedback_input],
+            progress=lambda message: progress(message, generation_job_percent(message, options.batch_size)),
+        ),
     )
     manifest.selected_index = candidate.index
     manifest.feedback = feedback
@@ -515,14 +567,20 @@ def iterate_job(payload: dict[str, Any], state: WebAppState, progress: Callable[
     return {"kind": "run", "run": run_response(new_run_dir)}
 
 
-def compose_from_payload(payload: dict[str, Any]):
+def compose_from_payload(payload: dict[str, Any]) -> PromptSpec:
+    return compose_batch_from_payload(payload, candidate_count=1)[0]
+
+
+def compose_batch_from_payload(payload: dict[str, Any], *, candidate_count: int | None = None) -> list[PromptSpec]:
     mode = str(payload.get("mode") or "description")
     text = str(payload.get("description") or payload.get("text") or "")
     direct = text if mode == "prompt" else None
     description = text if mode == "description" else None
     config = llm_config_from_payload(payload)
-    return compose_prompt(
+    count = candidate_count if candidate_count is not None else int(payload.get("batch_size") or 4)
+    return compose_prompt_batch(
         description,
+        candidate_count=count,
         direct_prompt=direct,
         force_pixel_trigger=True,
         llm_config=config,
@@ -530,8 +588,116 @@ def compose_from_payload(payload: dict[str, Any]):
     )
 
 
+def compose_with_temporary_prompt_service(
+    payload: dict[str, Any],
+    progress: Callable[[str, int | None], None],
+) -> PromptSpec:
+    config = llm_config_from_payload(payload)
+    return run_with_temporary_prompt_service(payload, config, progress, lambda: compose_from_payload(payload))
+
+
+def compose_batch_with_temporary_prompt_service(
+    payload: dict[str, Any],
+    progress: Callable[[str, int | None], None],
+    *,
+    candidate_count: int | None = None,
+) -> list[PromptSpec]:
+    config = llm_config_from_payload(payload)
+    return run_with_temporary_prompt_service(
+        payload,
+        config,
+        progress,
+        lambda: compose_batch_from_payload(payload, candidate_count=candidate_count),
+    )
+
+
+def run_with_temporary_prompt_service(
+    payload: dict[str, Any],
+    config: LLMConfig,
+    progress: Callable[[str, int | None], None],
+    work: Callable[[], T],
+) -> T:
+    mode = str(payload.get("mode") or "description")
+    if mode == "prompt" or config.provider != "ollama":
+        progress("Preparing prompt", 8)
+        return work()
+
+    report = lambda message: progress(message, 5 if "starting" in message.lower() else 8)
+    progress("Starting Ollama for prompt expansion", 3)
+    with temporary_ollama_server(config.endpoint, model=config.model, progress=report):
+        validation = validate_ollama_model(config.endpoint, config.model, auto_start=False)
+        if not validation.model_present:
+            raise RuntimeError(
+                f"Prompt model '{config.model}' is not installed in Ollama. Use Validate Prompt Model or Download Prompt Model first."
+            )
+        progress("Expanding the description with the prompt model", 10)
+        return work()
+
+
+def generate_with_temporary_comfy_service(
+    payload: dict[str, Any],
+    options: GenerationOptions,
+    progress: Callable[[str, int | None], None],
+    work: Callable[[], Path],
+) -> Path:
+    image_backend = normalize_image_backend(options.image_backend)
+    if options.dry_run:
+        progress("Dry run; no image backend was started", 30)
+        return work()
+
+    if image_backend == IMAGE_BACKEND_OPENAI:
+        progress("Sending generation requests to the Images API", 32)
+        return work()
+
+    report = lambda message: progress(message, 30 if "running" in message.lower() else 27)
+    backend_label = "custom workflow" if image_backend == IMAGE_BACKEND_CUSTOM_COMFY else "Qwen-Image-2512"
+    progress(f"Starting ComfyUI for {backend_label} generation", 27)
+    with temporary_comfyui_server(
+        options.comfy_url,
+        comfy_dir=str(payload.get("comfy_dir") or ""),
+        models_root=str(payload.get("models_root") or default_models_root()),
+        progress=report,
+        timeout_s=max(180, options.timeout),
+    ):
+        client = ComfyClient(options.comfy_url)
+        if image_backend == IMAGE_BACKEND_CUSTOM_COMFY:
+            template = load_custom_workflow(options.custom_workflow)
+            required_nodes = custom_workflow_node_types(template)
+        else:
+            required_nodes = required_node_types()
+        missing_nodes = validate_required_nodes(client, required_nodes)
+        if missing_nodes:
+            raise RuntimeError(f"ComfyUI is missing required workflow nodes: {', '.join(missing_nodes)}")
+        if image_backend == IMAGE_BACKEND_QWEN:
+            defaults = replace(DEFAULTS, diffusion_model=options.image_model or DEFAULTS.diffusion_model)
+            missing_assets = validate_model_assets(client, defaults)
+            if missing_assets:
+                names = ", ".join(missing_assets.values())
+                raise RuntimeError(f"ComfyUI is missing required Qwen-Image-2512 model files: {names}. Use Validate ComfyUI and Download Missing.")
+        progress(f"Generating with {backend_label}", 32)
+        return work()
+
+
+def generation_job_percent(message: str, batch_size: int) -> int | None:
+    percent = generation_percent(message, batch_size)
+    if percent is None:
+        return None
+    return min(96, 32 + int(percent * 0.64))
+
+
 def format_prompt_preview(spec: PromptSpec) -> str:
     return f"{spec.positive_prompt}\n\nNegative:\n{spec.negative_prompt}"
+
+
+def format_prompt_previews(specs: list[PromptSpec]) -> str:
+    if not specs:
+        return ""
+    if len(specs) == 1:
+        return format_prompt_preview(specs[0])
+    return "\n\n".join(
+        f"Candidate {index}\nPositive:\n{spec.positive_prompt}\n\nNegative:\n{spec.negative_prompt}"
+        for index, spec in enumerate(specs, start=1)
+    )
 
 
 def generation_options_from_payload(payload: dict[str, Any]) -> GenerationOptions:
@@ -541,15 +707,31 @@ def generation_options_from_payload(payload: dict[str, Any]) -> GenerationOption
     low_res = str(payload.get("low_res") or format_size(DEFAULT_LOW_RES))
     parse_size(high_res, DEFAULT_HIGH_RES)
     parse_size(low_res, DEFAULT_LOW_RES)
+    image_backend = normalize_image_backend(str(payload.get("image_backend") or IMAGE_BACKEND_QWEN))
+    image_model = str(payload.get("image_model") or "").strip()
+    if not image_model and image_backend == IMAGE_BACKEND_QWEN:
+        image_model = DEFAULTS.diffusion_model
+    elif not image_model and image_backend == IMAGE_BACKEND_OPENAI:
+        image_model = DEFAULT_OPENAI_IMAGE_MODEL
+    custom_workflow = str(payload.get("custom_workflow") or "").strip()
     return GenerationOptions(
         batch_size=int(payload.get("batch_size") or 4),
         high_res=high_res,
         low_res=low_res,
         seed=seed,
-        steps=int(payload.get("steps") or DEFAULTS.steps),
-        cfg=float(payload.get("cfg") or DEFAULTS.cfg),
+        steps=optional_int(payload.get("steps"), DEFAULTS.steps),
+        cfg=optional_float(payload.get("cfg"), DEFAULTS.cfg),
         lora_name=str(payload.get("lora_name") or DEFAULTS.pixel_lora),
         lora_strength=float(payload.get("lora_strength") or DEFAULTS.pixel_lora_strength),
+        image_backend=image_backend,
+        image_model=image_model,
+        image_endpoint=str(
+            payload.get("image_endpoint")
+            or os.environ.get("SPRITEPIPE_IMAGE_ENDPOINT")
+            or DEFAULT_OPENAI_IMAGES_ENDPOINT
+        ),
+        image_api_key=str(payload.get("image_api_key") or os.environ.get("SPRITEPIPE_IMAGE_API_KEY") or ""),
+        custom_workflow=Path(custom_workflow) if custom_workflow else None,
         comfy_url=str(payload.get("comfy_url") or DEFAULT_COMFY_URL),
         timeout=int(payload.get("timeout") or 900),
         output_dir=Path(str(payload.get("output_dir") or "runs")),
@@ -573,7 +755,7 @@ def llm_config_from_payload(payload: dict[str, Any]) -> LLMConfig:
         provider=provider,
         model=str(payload.get("llm_model") or env_config.model or DEFAULT_PROMPT_MODEL),
         endpoint=str(payload.get("llm_endpoint") or env_config.endpoint or DEFAULT_OLLAMA_ENDPOINT),
-        api_key=env_config.api_key,
+        api_key=str(payload.get("llm_api_key") or env_config.api_key),
         temperature=env_config.temperature,
         timeout_s=env_config.timeout_s,
         keep_alive=env_config.keep_alive,
@@ -589,6 +771,13 @@ def optional_int(value: object, default: int | None = None) -> int | None:
     if not text:
         return default
     return int(text)
+
+
+def optional_float(value: object, default: float | None = None) -> float | None:
+    text = str(value or "").strip()
+    if not text:
+        return default
+    return float(text)
 
 
 def latest_run_response(output_dir: Path) -> dict[str, Any]:
@@ -646,7 +835,7 @@ INDEX_HTML = """<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Sprite Motif Pipeline</title>
-  <link rel="stylesheet" href="/style.css?v=8">
+  <link rel="stylesheet" href="/style.css?v=13">
 </head>
 <body>
   <header class="topbar">
@@ -668,12 +857,18 @@ INDEX_HTML = """<!doctype html>
     <section class="panel controls">
       <div class="section-title">Backend</div>
       <div class="grid two">
-        <label>ComfyUI<input id="comfyUrl"></label>
+        <label>Image backend<select id="imageBackend"><option value="qwen-comfy">Built-in Qwen-Image-2512</option><option value="custom-comfy">Custom ComfyUI workflow</option><option value="openai-images">OpenAI-compatible Images API</option></select></label>
+        <label>Image model / identifier<input id="imageModel" list="imageModelHints"></label>
+        <datalist id="imageModelHints"><option value="qwen_image_2512_fp8_e4m3fn.safetensors"><option value="gpt-image-1"></datalist>
         <label>Output<input id="outputDir"></label>
-        <label class="wide">ComfyUI Folder<input id="comfyDir" placeholder="D:/AI/ComfyUI or ComfyUI_windows_portable"></label>
-        <label class="wide">Models<input id="modelsRoot"></label>
+        <label id="imageEndpointField" class="wide" hidden>Images API endpoint<input id="imageEndpoint" placeholder="https://api.openai.com/v1/images/generations"></label>
+        <label id="imageApiKeyField" class="wide" hidden>Images API key<input id="imageApiKey" type="password" autocomplete="off" placeholder="Kept only for this browser request"></label>
+        <label id="customWorkflowField" class="wide" hidden>ComfyUI API workflow JSON<input id="customWorkflow" placeholder="workflows/my_model_api.json"></label>
+        <label id="comfyUrlField">ComfyUI<input id="comfyUrl"></label>
+        <label id="comfyDirField" class="wide">ComfyUI Folder<input id="comfyDir" placeholder="D:/AI/ComfyUI or ComfyUI_windows_portable"></label>
+        <label id="modelsRootField" class="wide">Models<input id="modelsRoot"></label>
       </div>
-      <div class="toolbar">
+      <div id="comfyActions" class="toolbar">
         <button id="startComfy">Start ComfyUI</button>
         <button id="validateComfy">Validate ComfyUI</button>
         <button id="downloadModels">Download Missing</button>
@@ -685,32 +880,32 @@ INDEX_HTML = """<!doctype html>
         <label><input type="radio" name="mode" value="description" checked> Description</label>
         <label><input type="radio" name="mode" value="prompt"> Direct prompt</label>
       </div>
-      <textarea id="description" rows="6"></textarea>
+      <textarea id="description" rows="6" placeholder="Describe the character motif"></textarea>
 
       <div class="section-title">Generation</div>
       <div class="grid three">
         <label>Batch<input id="batchSize" type="number" min="1" max="32"></label>
         <label>Seed<input id="seed"></label>
-        <label>Steps<input id="steps" type="number" min="1" max="100"></label>
+        <label id="stepsField">Steps<input id="steps" type="number" min="1" max="100"></label>
         <label>High res<input id="highRes"></label>
         <label>Low res<input id="lowRes"></label>
-        <label>CFG<input id="cfg" type="number" step="0.1"></label>
-        <label class="wide">LoRA<input id="loraName"></label>
-        <label>Strength<input id="loraStrength" type="number" step="0.05"></label>
+        <label id="cfgField">CFG<input id="cfg" type="number" step="0.1"></label>
+        <label id="loraNameField" class="wide">LoRA<input id="loraName"></label>
+        <label id="loraStrengthField">Strength<input id="loraStrength" type="number" step="0.05"></label>
         <label>Timeout<input id="timeout" type="number" min="30"></label>
       </div>
-
       <div class="section-title">Prompt Model</div>
       <div class="grid two">
         <label>Provider<select id="llmProvider"><option>ollama</option><option>none</option><option>openai-compatible</option><option>openai</option></select></label>
-        <label>Model<input id="llmModel"></label>
-        <label class="wide">Endpoint<input id="llmEndpoint"></label>
-        <label>GPU layers<input id="llmNumGpu" type="number" min="0"></label>
-        <label>Context<input id="llmNumCtx" type="number" min="512" step="512"></label>
-        <label>Max tokens<input id="llmNumPredict" type="number" min="16" step="16"></label>
-        <label class="check"><input id="llmThink" type="checkbox"> Thinking</label>
+        <label id="llmModelField">Model<input id="llmModel"></label>
+        <label id="llmEndpointField" class="wide">Endpoint<input id="llmEndpoint"></label>
+        <label id="llmApiKeyField" class="wide" hidden>API key<input id="llmApiKey" type="password" autocomplete="off" placeholder="Kept only for this browser request"></label>
+        <label id="llmNumGpuField">GPU layers<input id="llmNumGpu" type="number" min="0"></label>
+        <label id="llmNumCtxField">Context<input id="llmNumCtx" type="number" min="512" step="512"></label>
+        <label id="llmNumPredictField">Max tokens<input id="llmNumPredict" type="number" min="16" step="16"></label>
+        <label id="llmThinkField" class="check"><input id="llmThink" type="checkbox"> Thinking</label>
       </div>
-      <div class="toolbar">
+      <div id="ollamaActions" class="toolbar">
         <button id="startLlm">Start Ollama</button>
         <button id="validateLlm">Validate Prompt Model</button>
         <button id="downloadLlm">Download Prompt Model</button>
@@ -782,7 +977,7 @@ INDEX_HTML = """<!doctype html>
       <pre id="inputHistory"></pre>
 
       <div class="section-title">Iteration</div>
-      <textarea id="feedback" rows="3">lighter armor, shorter hair, rounder silhouette</textarea>
+      <textarea id="feedback" rows="3" placeholder="Describe the change for the selected candidate"></textarea>
       <div class="toolbar">
         <button id="iterate">Iterate Selected</button>
       </div>
@@ -799,7 +994,7 @@ INDEX_HTML = """<!doctype html>
       </div>
     </section>
   </main>
-  <script src="/app.js?v=9"></script>
+  <script src="/app.js?v=13"></script>
 </body>
 </html>
 """
@@ -820,6 +1015,7 @@ STYLE_CSS = """
 }
 
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 body {
   margin: 0;
   min-width: 360px;
@@ -1150,9 +1346,10 @@ button.danger:hover {
 
 APP_JS = """
 const fields = [
+  "imageBackend", "imageModel", "imageEndpoint", "imageApiKey", "customWorkflow",
   "comfyUrl", "comfyDir", "modelsRoot", "outputDir", "description", "batchSize", "seed",
   "steps", "highRes", "lowRes", "cfg", "loraName", "loraStrength", "timeout",
-  "llmProvider", "llmModel", "llmEndpoint", "llmNumGpu", "llmNumCtx", "llmNumPredict", "llmThink"
+  "llmProvider", "llmModel", "llmEndpoint", "llmApiKey", "llmNumGpu", "llmNumCtx", "llmNumPredict", "llmThink"
 ];
 
 let currentRun = null;
@@ -1161,6 +1358,8 @@ let handledJob = 0;
 let heartbeatTimer = null;
 let pollTimer = null;
 let serverStopping = false;
+let activeImageBackend = null;
+let imageModelsByBackend = {};
 const viewerState = {
   zoom: 1,
   panX: 0,
@@ -1189,6 +1388,11 @@ async function api(path, body = null) {
 function payload() {
   const mode = document.querySelector("input[name='mode']:checked").value;
   return {
+    image_backend: $("imageBackend").value,
+    image_model: $("imageModel").value,
+    image_endpoint: $("imageEndpoint").value,
+    image_api_key: $("imageApiKey").value,
+    custom_workflow: $("customWorkflow").value,
     comfy_url: $("comfyUrl").value,
     comfy_dir: $("comfyDir").value,
     models_root: $("modelsRoot").value,
@@ -1197,10 +1401,10 @@ function payload() {
     description: $("description").value,
     batch_size: Number($("batchSize").value || 4),
     seed: $("seed").value,
-    steps: Number($("steps").value || 50),
+    steps: $("steps").value,
     high_res: $("highRes").value,
     low_res: $("lowRes").value,
-    cfg: Number($("cfg").value || 4),
+    cfg: $("cfg").value,
     lora_name: $("loraName").value,
     lora_strength: Number($("loraStrength").value || 0.9),
     timeout: Number($("timeout").value || 900),
@@ -1208,11 +1412,51 @@ function payload() {
     llm_provider: $("llmProvider").value,
     llm_model: $("llmModel").value,
     llm_endpoint: $("llmEndpoint").value,
+    llm_api_key: $("llmApiKey").value,
     llm_num_gpu: $("llmNumGpu").value,
     llm_num_ctx: $("llmNumCtx").value,
     llm_num_predict: $("llmNumPredict").value,
     llm_think: $("llmThink").checked
   };
+}
+
+function setHidden(id, hidden) {
+  const element = $(id);
+  if (element) element.hidden = hidden;
+}
+
+function updateImageBackendVisibility(switchModel = false) {
+  const backend = $("imageBackend").value;
+  if (switchModel && activeImageBackend) {
+    imageModelsByBackend[activeImageBackend] = $("imageModel").value;
+    $("imageModel").value = imageModelsByBackend[backend] || "";
+  }
+  activeImageBackend = backend;
+  const isApi = backend === "openai-images";
+  const isCustom = backend === "custom-comfy";
+  const isQwen = backend === "qwen-comfy";
+  for (const id of ["comfyUrlField", "comfyDirField", "modelsRootField", "comfyActions"]) setHidden(id, isApi);
+  setHidden("customWorkflowField", !isCustom);
+  setHidden("imageEndpointField", !isApi);
+  setHidden("imageApiKeyField", !isApi);
+  setHidden("downloadModels", !isQwen);
+  setHidden("loraNameField", isApi);
+  setHidden("loraStrengthField", isApi);
+  setHidden("stepsField", isApi);
+  setHidden("cfgField", isApi);
+}
+
+function updatePromptProviderVisibility() {
+  const provider = $("llmProvider").value;
+  const isOllama = provider === "ollama";
+  const isApi = provider === "openai" || provider === "openai-compatible";
+  const isNone = provider === "none";
+  setHidden("llmModelField", isNone);
+  setHidden("llmEndpointField", isNone);
+  setHidden("llmApiKeyField", !isApi);
+  for (const id of ["llmNumGpuField", "llmNumCtxField", "llmNumPredictField", "llmThinkField", "ollamaActions"]) {
+    setHidden(id, !isOllama);
+  }
 }
 
 function setStatus(text, percent = null) {
@@ -1378,6 +1622,17 @@ function showCandidateComparison(candidate) {
 }
 
 function applyDefaults(data) {
+  $("imageBackend").value = data.image_backend;
+  $("imageModel").value = data.image_model;
+  $("imageEndpoint").value = data.image_endpoint;
+  $("imageApiKey").value = "";
+  $("customWorkflow").value = data.custom_workflow;
+  imageModelsByBackend = {
+    "qwen-comfy": data.image_model,
+    "custom-comfy": "",
+    "openai-images": data.openai_image_model
+  };
+  activeImageBackend = data.image_backend;
   $("comfyUrl").value = data.comfy_url;
   $("comfyDir").value = data.comfy_dir;
   $("modelsRoot").value = data.models_root;
@@ -1396,10 +1651,13 @@ function applyDefaults(data) {
   $("llmProvider").value = data.llm_provider;
   $("llmModel").value = data.llm_model;
   $("llmEndpoint").value = data.llm_endpoint;
+  $("llmApiKey").value = "";
   $("llmNumGpu").value = data.llm_num_gpu;
   $("llmNumCtx").value = data.llm_num_ctx;
   $("llmNumPredict").value = data.llm_num_predict;
   $("llmThink").checked = data.llm_think;
+  updateImageBackendVisibility();
+  updatePromptProviderVisibility();
 }
 
 async function validateComfy() {
@@ -1408,6 +1666,11 @@ async function validateComfy() {
   if (result.status === "ready") {
     setStatus("ComfyUI ready", 100);
     appendLog("ComfyUI ready");
+    return;
+  }
+  if (result.status === "not_required") {
+    setStatus("ComfyUI not required", 100);
+    appendLog(result.message);
     return;
   }
   if (result.status === "missing_nodes") {
@@ -1425,6 +1688,8 @@ async function validateComfy() {
       setBusy(false);
       throw error;
     }
+  } else if (!result.local_missing.length) {
+    alert("The selected model is not available in ComfyUI. Install it manually or choose the built-in Qwen model.");
   }
 }
 
@@ -1520,33 +1785,6 @@ async function unloadPromptModel() {
   }
 }
 
-async function ensurePromptModelReady() {
-  const data = payload();
-  if (data.mode === "prompt" || data.llm_provider === "none" || data.llm_provider !== "ollama") return true;
-  setBusy(true);
-  setStatus("Validating prompt model", 0);
-  const result = await api("/api/validate-llm", data);
-  if (result.status === "ready") return true;
-  if (result.status === "missing_model") {
-    if (confirm(`Prompt model ${result.result.model} is missing. Download it now?`)) {
-      try {
-        await api("/api/download-llm", data);
-        setStatus("Downloading prompt model", 0);
-        appendLog(`Downloading prompt model: ${result.result.model}`);
-        return false;
-      } catch (error) {
-        setBusy(false);
-        throw error;
-      }
-    }
-    setBusy(false);
-    return false;
-  }
-  setBusy(false);
-  showPromptModelProblem(result);
-  return false;
-}
-
 function showPromptModelProblem(result) {
   const detail = result.result || {};
   if (result.status === "server_unavailable") {
@@ -1566,7 +1804,6 @@ function showPromptModelProblem(result) {
 
 async function previewPrompt() {
   try {
-    if (!(await ensurePromptModelReady())) return;
     setBusy(true);
     setStatus("Previewing prompt", 0);
     const result = await api("/api/preview-prompt", payload());
@@ -1580,7 +1817,6 @@ async function previewPrompt() {
 
 async function generate() {
   try {
-    if (!(await ensurePromptModelReady())) return;
     setBusy(true);
     const result = await api("/api/generate", payload());
     handledJob = 0;
@@ -1594,7 +1830,6 @@ async function generate() {
 async function iterate() {
   if (!currentRun) return alert("Load a run first.");
   try {
-    if (!(await ensurePromptModelReady())) return;
     setBusy(true);
     const body = {
       ...payload(),
@@ -1759,7 +1994,7 @@ async function pollJob() {
       setBusy(false);
       if (job.error) appendLog(`error=${job.error}`);
       if (job.result && job.result.kind === "prompt") {
-        $("promptPreview").value = `${job.result.positive_prompt}\\n\\nNegative:\\n${job.result.negative_prompt}`;
+        $("promptPreview").value = job.result.preview_text || `${job.result.positive_prompt}\\n\\nNegative:\\n${job.result.negative_prompt}`;
         appendLog(job.result.notes || `Prompt source: ${job.result.source}`);
       }
       if (job.result && job.result.kind === "run") renderRun(job.result.run);
@@ -1776,6 +2011,8 @@ async function pollJob() {
 }
 
 function bind() {
+  $("imageBackend").onchange = () => updateImageBackendVisibility(true);
+  $("llmProvider").onchange = () => updatePromptProviderVisibility();
   $("startComfy").onclick = () => startComfy().catch((error) => alert(error.message));
   $("validateComfy").onclick = () => validateComfy().catch((error) => alert(error.message));
   $("downloadModels").onclick = () => {
